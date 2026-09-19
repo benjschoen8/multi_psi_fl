@@ -32,7 +32,7 @@ exp_conf keys (all optional):
   rt_client_langs        [en, zh, es]   attn*: language each client writes its descriptions in (cycled by client id)
   rt_text_encoders       [paraphrase-multilingual-MiniLM-L12-v2]   attn*: each client's OWN text encoder
                                     (cycled by client id; may differ per client -- only the anchor LIST is shared)
-  rt_descriptions        null       JSON {"<client_id>": {"<local_id>": "text"}} to override generated descriptions
+  rt_descriptions        null       JSON {"<client_id>": {"<local_id>": ["kw1", "kw2", ...]}} overrides generated keywords
   rt_tau                 null       attn* temperature; null -> 0.05
   rt_group_by            'pacfl'    'pacfl' | 'dataset' (groups = one per dataset; for smoke tests / sanity)
 """
@@ -51,7 +51,7 @@ from tqdm import tqdm
 from trainer.GeFL_gan_pacfl_iid.server import Server as OldServer
 from label_mapping.label_mapping_utils import global_to_local_mapping
 from label_mapping.rt_protocol import LADDER, run_rt_protocol, to_group_map, pair_metrics, TEXT_ANCHORS
-from label_mapping.rt_descriptions import describe, LANGS
+from label_mapping.rt_descriptions import keywords, LANGS
 from data.datasets import get_raw_dataset_transform
 
 _MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -257,8 +257,11 @@ class Server(OldServer):
 
     # ------------------------------------------------------------------ attn*: client-written descriptions
     def _rt_text_side(self, clients, rows):
-        """Each client writes its own description of each own class in its own language and encodes it,
-        and the public anchor LIST, with ITS OWN text encoder. Nothing but TEXT_ANCHORS is agreed.
+        """Each client writes KEYWORDS for each own class in its own language (e.g. ["數字", "三"]) and
+        encodes every keyword SEPARATELY, plus the public anchor LIST, with ITS OWN text encoder.
+        keyword_attn in rt_protocol then attends each keyword over the anchors and weights them by
+        local IDF (a keyword shared by all own classes, like "digit" on an MNIST client, gets weight 0).
+        Nothing but TEXT_ANCHORS is agreed.
         ponytail: simulated server-side; in deployment each client does this locally."""
         from sentence_transformers import SentenceTransformer
         langs = list(self.cfg('rt_client_langs', ['en', 'zh', 'es']))
@@ -269,7 +272,8 @@ class Server(OldServer):
         override = {}
         if self.cfg('rt_descriptions', None):
             with open(self.cfg('rt_descriptions', None), encoding='utf-8') as f:
-                override = {int(k): {int(a): t for a, t in v.items()} for k, v in json.load(f).items()}
+                override = {int(k): {int(a): ([t] if isinstance(t, str) else list(t)) for a, t in v.items()}
+                            for k, v in json.load(f).items()}
         models = {}
         for c in self.clients:
             if c.id not in clients:
@@ -280,11 +284,13 @@ class Server(OldServer):
                 models[enc_name] = SentenceTransformer(enc_name, device='cpu')
             m = models[enc_name]
             labels = sorted(clients[c.id]["summ"])
-            texts = [override.get(c.id, {}).get(a) or describe(c.dataset_name, c.class_name_set[a], lang) for a in labels]
-            vec = m.encode(texts, normalize_embeddings=True)
-            clients[c.id]["desc_vecs"] = dict(zip(labels, vec))
+            kws = [override.get(c.id, {}).get(a) or keywords(c.dataset_name, c.class_name_set[a], lang) for a in labels]
+            vocab = list(dict.fromkeys(k for kw in kws for k in kw))
+            vec = dict(zip(vocab, m.encode(vocab, normalize_embeddings=True)))
+            clients[c.id]["keywords"] = dict(zip(labels, kws))
+            clients[c.id]["keyword_vecs"] = {a: np.stack([vec[k] for k in kw]) for a, kw in zip(labels, kws)}
             clients[c.id]["anchor_vecs"] = m.encode(TEXT_ANCHORS, normalize_embeddings=True)
-            rows += [(c.id, a, lang, enc_name, t) for a, t in zip(labels, texts)]
+            rows += [(c.id, a, lang, enc_name, " | ".join(kw)) for a, kw in zip(labels, kws)]
         self.logger.log(f"[RT] descriptions: langs={langs} encoders={encs} anchors={len(TEXT_ANCHORS)} words")
 
     # ------------------------------------------------------------------ RT protocol
@@ -353,7 +359,7 @@ class Server(OldServer):
 
         with open(os.path.join(d, "rt_local_tables.csv"), 'w', newline='') as f:     # tex: |id|masked_id|description|
             w = csv.writer(f)
-            w.writerow(["client_id", "group_name", "local_id", "masked_id", "lang", "text_encoder", "description"])
+            w.writerow(["client_id", "group_name", "local_id", "masked_id", "lang", "text_encoder", "keywords"])
             dmap = {(r[0], r[1]): r for r in desc_rows}
             for (cid, a), mid in sorted(masked.items()):
                 r = dmap.get((cid, a), (cid, a, "", "", by_id[cid].class_name_set[a]))
