@@ -1,3 +1,0 @@
-method,n_seeds,f1_mean,f1_std,precision_mean,precision_std,recall_mean,recall_std,FP_mean,FP_std,acc_strict_mean,acc_strict_std,acc_digit_mean,acc_digit_std
-psi_attn_filter,5,1.0,0.0,1.0,0.0,1.0,0.0,0.0,0.0,92.30653889534929,5.387383454972875,92.30653889534929,5.387383454972875
-oracle,5,1.0,0.0,1.0,0.0,1.0,0.0,0.0,0.0,92.30653889534929,5.387383454972875,92.30653889534929,5.387383454972875

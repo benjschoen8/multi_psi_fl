@@ -1,0 +1,7 @@
+
+# macOS / build scratch
+.DS_Store
+tmp/
+output/
+*.aux
+/psi_fl_relation_table.pdf
