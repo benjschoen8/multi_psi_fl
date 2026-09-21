@@ -17,8 +17,11 @@ Outputs in log_dir:
 exp_conf keys (all optional):
   rt_method              'filter'   'filter' | 'affscan' | 'attn' | 'attn_filter'
   rt_psi                 'he'       'he' (CKKS, needs `pip install tenseal`) | 'plain' (debug)
-                                     | 'circuit' (server-free fuzzy circuit-PSI; attn_filter/precision only)
-                                     | 'vole' (VOLE circuit-PSI, per-pair 2PC, no helper client)
+                                     | 'cpsi_helper' (BFV circuit-PSI + helper client; server sees final table only)
+                                     | 'cpsi_2pc'    (VOLE circuit-PSI, per-pair 2PC, 2PC grouping; no helper)
+                                     | 'cpsi_tag'    (VOLE circuit-PSI, equality tags; server groups in the clear)
+                                     | 'psi_tag_hash' (per-check fuzzy-PSI tags, hash(text|image|verify); no circuit)
+                                     cpsi_*: attn_filter/precision only
   rt_anchor_datasets     [FashionMNIST, USPS, CIFAR100]  public probes, TEST split; must not be used by any client
   rt_num_anchors         300
   rt_exemplars_per_class 64

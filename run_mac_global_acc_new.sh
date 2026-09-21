@@ -36,9 +36,13 @@ done
 
 # PSI, attention versions (client-written multilingual descriptions, en/zh/es):
 #   attn_filter = description attention + image filter ; attn = description attention only
-#   circuit / vole = attn_filter (description + image, one PSI message) as server-free circuit-PSI:
-#                    circuit = BFV + helper client (model A), vole = VOLE + per-pair 2PC (model C)
-for V in attn_filter attn circuit vole; do
+#   cpsi_* = attn_filter (description + image in one PSI message) as server-free circuit-PSI:
+#     cpsi_helper = BFV PSI + 2PC with a helper client      (server sees final table only)
+#     cpsi_2pc    = VOLE PSI + per-pair 2PC + 2PC grouping  (server sees final table only, no helper)
+#     cpsi_tag    = VOLE PSI + per-pair 2PC -> equality tags (server sees pairwise matches, groups itself)
+#   psi_tag_hash  = per-check fuzzy-PSI tags, each side sends hash(tag_text|tag_image|tag_verify);
+#                   server: AND via equal hashes, Mutual, grouping. No circuit, no rival margin.
+for V in attn_filter attn cpsi_helper cpsi_2pc cpsi_tag psi_tag_hash; do
   sed "s/^global_rounds: .*/global_rounds: ${ROUNDS}/" configs/het-iid-exp_rt_${V}_mps_new.yaml > configs/het-iid-exp_${TAG}_${V}_new.yaml
   D=logs/${TAG}_rt_${V}/GeFL_gan_pacfl_iid
   if [ -f $D/global_model_acc_mix.csv ] && [ "$(wc -l < $D/global_model_acc_mix.csv)" -gt $ROUNDS ]; then
@@ -50,11 +54,13 @@ for V in attn_filter attn circuit vole; do
 done
 
 python3 plot/plot_global_model_acc_new.py \
-  --psi "PSI (filter)=logs/${TAG}_rt/GeFL_gan_pacfl_iid" \
-  --psi "PSI (attn_filter)=logs/${TAG}_rt_attn_filter/GeFL_gan_pacfl_iid" \
-  --psi "PSI (attn)=logs/${TAG}_rt_attn/GeFL_gan_pacfl_iid" \
-  --psi "PSI circuit (BFV)=logs/${TAG}_rt_circuit/GeFL_gan_pacfl_iid" \
-  --psi "PSI circuit (VOLE)=logs/${TAG}_rt_vole/GeFL_gan_pacfl_iid" \
+  --psi "FPSI-DescFilter [CKKS]=logs/${TAG}_rt/GeFL_gan_pacfl_iid" \
+  --psi "FPSI-AttnImage [CKKS]=logs/${TAG}_rt_attn_filter/GeFL_gan_pacfl_iid" \
+  --psi "FPSI-AttnText [CKKS]=logs/${TAG}_rt_attn/GeFL_gan_pacfl_iid" \
+  --psi "CPSI-Helper [BFV]=logs/${TAG}_rt_cpsi_helper/GeFL_gan_pacfl_iid" \
+  --psi "CPSI-2PC [VOLE]=logs/${TAG}_rt_cpsi_2pc/GeFL_gan_pacfl_iid" \
+  --psi "CPSI-Tag [VOLE]=logs/${TAG}_rt_cpsi_tag/GeFL_gan_pacfl_iid" \
+  --psi "PSI-TagHash [OPPRF]=logs/${TAG}_rt_psi_tag_hash/GeFL_gan_pacfl_iid" \
   --run "Ours (image-bi)=logs/${TAG}_image-bi/GeFL_gan_pacfl_iid" \
   --run "Missing Link=logs/${TAG}_missing_link/GeFL_gan_pacfl_iid" \
   --run "feature-bi=logs/${TAG}_feature-bi/GeFL_gan_pacfl_iid" \

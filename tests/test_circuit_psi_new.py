@@ -1,4 +1,4 @@
-"""circuit-PSI (model A: BFV + helper, model C: VOLE + per-pair 2PC) == plaintext precision protocol (same partition), plus MPC/HE primitive checks.
+"""circuit-PSI (cpsi_helper / cpsi_2pc / cpsi_tag) == plaintext precision protocol (same partition), plus MPC/HE primitive checks.
 
     python3 tests/test_circuit_psi_new.py          # ~30 s, needs tenseal
 """
@@ -56,7 +56,7 @@ def main():
         extra = dict(n_clients=5, n_concepts=10, per_client=6, noise=.3, img_noise=.12) if hard else {}
         clients, P = make(seed, **extra)
         plain, edges, _ = run_rt_protocol(clients, P, psi="plain", seed=seed, **kw)
-        for psi in ("circuit", "vole"):
+        for psi in ("cpsi_helper", "cpsi_2pc", "cpsi_tag"):
             circ, _, _ = run_rt_protocol(clients, P, psi=psi, seed=seed, **kw)
             assert partition(plain) == partition(circ), f"seed {seed}: {psi} table != plaintext table"
         print(f"seed {seed}: {len(edges)} edges, {len(set(plain.values()))} global ids -> identical")

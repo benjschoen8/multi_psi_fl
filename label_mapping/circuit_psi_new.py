@@ -406,6 +406,19 @@ def reshare(mpc, x):
     return Sh(r + s, (x.a - r) + (x.b - s))
 
 
+def cond_tags(mpc, bit, st):
+    """Equality tags for a shared bit held by the pair (i, j); used by model D.
+    i draws rho; the 2PC outputs tau = rho + (1 - bit) * u to j only (u: joint random, never opened).
+    bit = 1 -> tau == rho;  bit = 0 -> tau != rho (w.p. 1 - 2^-64).  tau is uniform to j (rho secret),
+    rho is independent of bit, so neither client learns bit.  Both send their tag to the server."""
+    rho = mpc.rand(bit.shape)                                    # i's tag
+    u = mpc.split(mpc.rand(bit.shape))                           # jointly random shares
+    t = mpc.mul(1 - bit, u)
+    tau = (t.a + rho) + t.b                                      # i sends t.a + rho to j (8 B/entry)
+    st["tag_bytes"] += 8 * bit.a.size * 3                        # i->j, i->server, j->server
+    return rho, tau
+
+
 # =============================================================== Phase 3: matching circuit
 def ladder_bits(mpc, C, ladder):
     """shares of [cos > d] for d ascending, shape (m, *C.shape)."""
@@ -524,19 +537,12 @@ def grouping_circuit(mpc, U, V, E, W, N, client_of, H, B):
 
 
 # =============================================================== full protocol
-def run_circuit(clients, P, ladder=rp.LADDER, tau=None, coord="log_whiten", min_samples=10, seed=0,
-                K_text=None, verify_ladder=rp.VERIFY_LADDER, verify_floor=.90, verify_margin=.01,
-                log=print, masked_out=None, model="A", **_):
-    """model "A": BFV PSI -> all matching + grouping by P0/P1 with a helper client dealing triples.
-    model "C": VOLE PSI -> each pair (i,j) runs ITS OWN matching as 2PC on the shares it holds ->
-    reshare edge/weight/support to P0/P1 -> grouping 2PC.  Triples from silent-OT/VOLE PCGs: no helper."""
-    rng = np.random.default_rng(seed)                            # masked ids: same as rt_protocol
-    lad = lambda k: np.asarray(ladder[k] if isinstance(ladder, dict) else ladder, dtype=float)
+def phase1(clients, P, tau=None, coord="log_whiten", min_samples=10, seed=0, K_text=None):
+    """Local, per client (identical to rt_protocol attn_filter/precision, same masked ids).
+    -> inv {i: {masked: local}}, sigs {"main"|"aff"|"verify": {i: rows}}, n_elig, ids, pairs."""
+    rng = np.random.default_rng(seed)
     tau = 0.05 if tau is None else tau
     K_text = None if K_text is None else rp.unit(np.asarray(K_text, float))
-    t0 = time.time()
-
-    # ---------------- Phase 1 (local; identical to rt_protocol attn_filter/precision)
     inv, sigs, n_elig = {}, defaultdict(dict), {}
     for i, c in clients.items():
         elig = [a for a in sorted(c["summ"]) if c["count"][a] >= min_samples]
@@ -556,10 +562,26 @@ def run_circuit(clients, P, ladder=rp.LADDER, tau=None, coord="log_whiten", min_
                            else rp.center_unit(alpha if coord == "alpha" else pooled))
     ids = sorted(i for i in clients if n_elig[i] > 0)
     pairs = [(i, j) for x, i in enumerate(ids) for j in ids[x + 1:]]
+    return inv, sigs, n_elig, ids, pairs
+
+
+def run_circuit(clients, P, ladder=rp.LADDER, tau=None, coord="log_whiten", min_samples=10, seed=0,
+                K_text=None, verify_ladder=rp.VERIFY_LADDER, verify_floor=.90, verify_margin=.01,
+                log=print, masked_out=None, model="A", **_):
+    """model "A": BFV PSI -> all matching + grouping by P0/P1 with a helper client dealing triples.
+    model "C": VOLE PSI -> each pair (i,j) runs ITS OWN matching as 2PC on the shares it holds ->
+    reshare edge/weight/support to P0/P1 -> grouping 2PC.  Triples from silent-OT/VOLE PCGs: no helper.
+    model "D": as C up to the per-pair 2PC; then each pair emits EQUALITY TAGS (edge, support) and
+    edge weights masked by the edge bit to the server, which groups in the clear (rp.global_table).
+    Clients learn nothing; the server learns the pairwise Mutual edges, their weights and support."""
+    lad = lambda k: np.asarray(ladder[k] if isinstance(ladder, dict) else ladder, dtype=float)
+    t0 = time.time()
+    inv, sigs, n_elig, ids, pairs = phase1(clients, P, tau, coord, min_samples, seed, K_text)
     t1 = time.time()
 
     # ---------------- Phase 2: pairwise fuzzy circuit-PSI (clients only)
-    vole = model == "C"
+    vole = model in ("C", "D")
+    tags = model == "D"
     mpc, st = MPC(pcg=vole), defaultdict(int)                    # model C: grouping 2PC of P0/P1
     pair_mpc = MPC(pcg=True) if vole else mpc                    # model C: per-pair 2PC of i, j
     he_rng = np.random.default_rng(secrets.randbits(128))
@@ -575,10 +597,20 @@ def run_circuit(clients, P, ladder=rp.LADDER, tau=None, coord="log_whiten", min_
     client_of = np.array([k for k, i in enumerate(ids) for _ in range(n_elig[i])])
     H = Sh.public(np.zeros((N, N), np.int64))
     U, V, E, W = [], [], [], []
+    srv_edges, srv_support = [], set()                           # model D: what the server sees
     for i, j in pairs:
         sup, edge, score = precision_circuit(pair_mpc, C["main"][i, j], C["aff"][i, j], C["verify"][i, j],
                                              lad("main"), lad("aff"), np.asarray(verify_ladder, float),
                                              verify_floor, verify_margin)
+        if tags:                                                 # i, j -> server: tags only
+            ep, et = cond_tags(pair_mpc, edge, st)
+            hp, ht = cond_tags(pair_mpc, sup, st)
+            w = pair_mpc.mul(edge, score)                        # weight of real edges, 0 otherwise
+            st["tag_bytes"] += 16 * w.a.size                     # both shares -> server
+            wv = dec(w.a + w.b)                                  # server reconstructs
+            srv_edges += [(i, int(a), j, int(b), int(wv[a, b])) for a, b in zip(*np.where(ep == et))]
+            srv_support |= {frozenset(((i, int(a)), (j, int(b)))) for a, b in zip(*np.where(hp == ht))}
+            continue
         if vole:                                                 # i, j -> P0, P1 (no opening)
             sup, edge, score = reshare(mpc, sup), reshare(mpc, edge), reshare(mpc, score)
         ri, rj = slice(base[i], base[i] + n_elig[i]), slice(base[j], base[j] + n_elig[j])
@@ -589,18 +621,21 @@ def run_circuit(clients, P, ladder=rp.LADDER, tau=None, coord="log_whiten", min_
         E.append(edge.reshape(-1)), W.append(score.reshape(-1))
     B = sum(min(n_elig[i], n_elig[j]) for i, j in pairs)         # public bound on #Mutual edges
     t3 = time.time()
-    label = (grouping_circuit(mpc, np.concatenate(U), np.concatenate(V), Sh.cat(E), Sh.cat(W),
-                              N, client_of, H, B) if pairs else Sh.public(np.arange(N)))
-    t4 = time.time()
-
-    # ---------------- Output: P0, P1 send label shares to the server, which reconstructs
-    mpc.st["bytes_to_server"] += 16 * N
-    lab = dec(label.a + label.b)
-    node = [(i, m) for i in ids for m in range(n_elig[i])]
-    root = {(i, m): (i, m) for i in clients for m in inv[i]}
-    root.update({node[n]: node[int(lab[n])] for n in range(N)})
-    gid = {r: g for g, r in enumerate(sorted(set(root.values())))}
-    table = {k: gid[r] for k, r in root.items()}
+    if tags:                                                     # model D: server groups in the clear
+        table = rp.global_table(srv_edges, {i: list(inv[i]) for i in clients}, support=srv_support)
+        t4 = time.time()
+    else:
+        label = (grouping_circuit(mpc, np.concatenate(U), np.concatenate(V), Sh.cat(E), Sh.cat(W),
+                                  N, client_of, H, B) if pairs else Sh.public(np.arange(N)))
+        t4 = time.time()
+        # ---------------- Output: P0, P1 send label shares to the server, which reconstructs
+        mpc.st["bytes_to_server"] += 16 * N
+        lab = dec(label.a + label.b)
+        node = [(i, m) for i in ids for m in range(n_elig[i])]
+        root = {(i, m): (i, m) for i in clients for m in inv[i]}
+        root.update({node[n]: node[int(lab[n])] for n in range(N)})
+        gid = {r: g for g, r in enumerate(sorted(set(root.values())))}
+        table = {k: gid[r] for k, r in root.items()}
 
     if masked_out is not None:
         masked_out.update({(i, a): m for i in inv for m, a in inv[i].items()})
@@ -609,25 +644,121 @@ def run_circuit(clients, P, ladder=rp.LADDER, tau=None, coord="log_whiten", min_
         for k, v in pair_mpc.st.items():
             st[f"pair2pc_{k}"] += v
     diag = {**{k: np.array(v) for k, v in st.items()}, **{k: np.array(v) for k, v in mpc.st.items()},
-            "n_nodes": np.array(N), "n_candidates": np.array(sum(map(len, U))), "union_steps": np.array(B),
+            "n_nodes": np.array(N), "n_candidates": np.array(N * N), "union_steps": np.array(0 if tags else B),
             "sec_phase1": np.array(t1 - t0), "sec_psi": np.array(t2 - t1),
             "sec_match": np.array(t3 - t2), "sec_group": np.array(t4 - t3)}
     psi_b = st["vole_bytes"] + st["he_bytes"]
     mpc_b = (mpc.st["bytes_open"] + mpc.st["bytes_helper"] + mpc.st["bytes_reshare"]
-             + st["pair2pc_bytes_open"])
-    log(f"[RT] circuit-PSI model {model}: {N} classes, {len(pairs)} pairs, {len(set(table.values()))} global ids"
+             + st["pair2pc_bytes_open"] + st["tag_bytes"])
+    log(f"[RT] {NAMES[model]}: {N} classes, {len(pairs)} pairs, {len(set(table.values()))} global ids"
         f" | PSI {psi_b / 1e6:.1f} MB, MPC {mpc_b / 1e6:.0f} MB | psi {t2 - t1:.0f}s match {t3 - t2:.0f}s"
         f" group {t4 - t3:.0f}s")
-    return out, [], diag                                        # edges are never revealed
+    return out, (srv_edges if tags else []), diag              # A/C: edges never revealed
+
+
+# =============================================================== psi-tag-hashing (no circuit)
+TAG_BITS = 128
+
+
+def _hash_tags(i, j, *tags):
+    """H("rt" | i | j | tag_1 | tag_2 | ...) per class pair; domain-separated by the client pair."""
+    import hashlib
+    n_i, n_j = tags[0].shape[:2]
+    out = np.empty((n_i, n_j), object)
+    pre = f"rt|{i}|{j}|".encode()
+    for a in range(n_i):
+        for b in range(n_j):
+            h = hashlib.blake2b(pre + b"".join(t[a, b].tobytes() for t in tags), digest_size=TAG_BITS // 8)
+            out[a, b] = h.digest()
+    return out
+
+
+def run_tag_hash(clients, P, ladder=rp.LADDER, tau=None, coord="log_whiten", min_samples=10, seed=0,
+                 K_text=None, verify_floor=.90, log=print, masked_out=None, tag_branches="priority", **_):
+    """psi-tag-hashing: per check, a fuzzy PSI (OPPRF-style) gives each side a TAG per class pair,
+    equal iff that check passes.  Each side hashes its tags of one branch locally,
+    H(tag_text | tag_image | tag_verify), and sends only the hash to the server -> the server learns
+    the AND, not the single checks.  Two branches mirror the precision rule's eligibility:
+        strong text : text > top text rung   AND image > lowest image rung AND verify > floor
+        strong image: text > lowest text rung AND image > top image rung   AND verify > floor
+    Server: match = branch1 OR branch2 (it learns which branch), Mutual on the bits, complete-link
+    support = matched pairs, union-find in the clear.  No circuit: no rival margin, no weight order.
+    ponytail: the fuzzy-PSI tag step is simulated as its ideal functionality (per pair, per check:
+    equal random tags iff sim > delta); an OPPRF instantiation needs disjoint delta-balls."""
+    lad = lambda k: np.asarray(ladder[k] if isinstance(ladder, dict) else ladder, dtype=float)
+    t0 = time.time()
+    inv, sigs, n_elig, ids, pairs = phase1(clients, P, tau, coord, min_samples, seed, K_text)
+    lt, la = lad("main"), lad("aff")
+    strong_text = {"main": lt.max(), "aff": la.min(), "verify": verify_floor}
+    strong_image = {"main": lt.min(), "aff": la.max(), "verify": verify_floor}
+    # Without the rival margin, the strong-image branch admits look-alike classes (weak text) and makes
+    # rows ambiguous, so Mutual would drop the true edge too.  "priority" (default): the server ranks a
+    # strong-text match above a strong-image-only match (score 2 vs 1) before Mutual -- it already
+    # learns the branch.  "text": strong-text branch only.  "both": plain OR (ablation).
+    branches = [strong_text] if tag_branches == "text" else [strong_text, strong_image]
+    prio = [2, 1] if tag_branches == "priority" else [1, 1]
+    g = np.random.Generator(np.random.Philox(key=secrets.randbits(128)))
+    words = TAG_BITS // 64
+    edges, support, st = [], set(), defaultdict(int)
+    for i, j in pairs:
+        n_i, n_j = n_elig[i], n_elig[j]
+        match = np.zeros((n_i, n_j), bool)
+        score = np.zeros((n_i, n_j), np.int32)
+        for br, pr in zip(branches, prio):
+            ty, tt = [], []
+            for k, delta in br.items():
+                ok = sigs[k][i] @ sigs[k][j].T > delta                    # ideal fuzzy-PSI predicate
+                t = g.bit_generator.random_raw(n_i * n_j * words).reshape(n_i, n_j, words)   # sender tag
+                y = np.where(ok[..., None], t,
+                             g.bit_generator.random_raw(n_i * n_j * words).reshape(n_i, n_j, words))
+                ty.append(y), tt.append(t)                               # receiver tag
+            hy, ht = _hash_tags(i, j, *ty), _hash_tags(i, j, *tt)        # local hashing, each side
+            st["tag_bytes"] += 2 * (TAG_BITS // 8) * n_i * n_j          # both hashes -> server
+            hit = hy == ht                                               # server: equal hash = AND
+            match |= hit
+            score = np.maximum(score, pr * hit)
+        mu = rp.mutual(score)                                           # server: Mutual on branch scores
+        edges += [(i, a, j, b, 1) for a, b in mu]                       # server: Mutual on bits
+        st["and_pairs"] += int(match.sum())
+        st["rows_ambiguous"] += int((match.sum(1) > 1).sum())          # >1 candidate: Mutual abstains
+        st["cols_ambiguous"] += int((match.sum(0) > 1).sum())
+        st["rows_matched"] += int((match.sum(1) > 0).sum())
+        st["mutual_edges"] += len(mu)
+        support |= {frozenset(((i, int(a)), (j, int(b)))) for a, b in zip(*np.where(match))}
+    table = rp.global_table(edges, {i: list(inv[i]) for i in clients}, support=support)
+    if masked_out is not None:
+        masked_out.update({(i, a): m for i in inv for m, a in inv[i].items()})
+    out = {(i, inv[i][m]): gv for (i, m), gv in table.items()}
+    log(f"[RT] psi_tag_hash: AND pairs {st['and_pairs']}, rows with a match {st['rows_matched']}, "
+        f"ambiguous rows {st['rows_ambiguous']} / cols {st['cols_ambiguous']} (dropped by Mutual)")
+    log(f"[RT] psi_tag_hash: {sum(n_elig.values())} classes, {len(pairs)} pairs, {len(edges)} edges, "
+        f"{len(set(table.values()))} global ids | tags to server {st['tag_bytes'] / 1e3:.0f} KB "
+        f"(fuzzy-PSI traffic not modelled) | {time.time() - t0:.1f}s")
+    return out, edges, {k: np.array(v) for k, v in st.items()}
+
+
+NAMES = {"A": "cpsi_helper (BFV PSI, 2PC with helper client)",
+         "C": "cpsi_2pc (VOLE PSI, per-pair 2PC, 2PC grouping)",
+         "D": "cpsi_tag (VOLE PSI, per-pair 2PC, equality tags -> server groups)"}
+MODEL_OF = {"cpsi_helper": "A", "cpsi_2pc": "C", "cpsi_tag": "D",
+            "circuit": "A", "vole": "C", "vole_tag": "D"}          # old names kept as aliases
 
 
 def run_rt_protocol(clients, P, method="filter", psi="he", **kw):
     """Drop-in for rt_protocol.run_rt_protocol.
-    psi="circuit": BFV circuit-PSI, helper-dealt 2PC (model A).
-    psi="vole":    VOLE circuit-PSI, per-pair 2PC + resharing, PCG triples, no helper (model C)."""
-    if psi not in ("circuit", "vole"):
+    psi="cpsi_helper": BFV circuit-PSI, helper-dealt 2PC; server sees only the final table   (model A)
+    psi="cpsi_2pc":    VOLE circuit-PSI, per-pair 2PC + 2PC grouping, no helper; same output (model C)
+    psi="cpsi_tag":    VOLE circuit-PSI, per-pair 2PC -> equality tags; server groups         (model D)
+    psi="psi_tag_hash" ("psi-tag-hashing"): per-check fuzzy-PSI tags, hashed per branch; server does
+                       AND/OR, Mutual and grouping in the clear; no circuit, no rival margin.
+    anything else ("he", "plain") -> rt_protocol."""
+    if psi in ("psi_tag_hash", "psi-tag-hashing"):
+        if method != "attn_filter":
+            raise ValueError("psi_tag_hash implements method=attn_filter")
+        return run_tag_hash(clients, P, **kw)
+    if psi not in MODEL_OF:
         return rp.run_rt_protocol(clients, P, method=method, psi=psi, **kw)
     if method != "attn_filter" or kw.get("attn_match", "precision") != "precision":
         raise ValueError(f"psi={psi} implements method=attn_filter, attn_match=precision")
     with np.errstate(over="ignore"):          # Z_2^64 wraparound is intended
-        return run_circuit(clients, P, model="C" if psi == "vole" else "A", **kw)
+        return run_circuit(clients, P, model=MODEL_OF[psi], **kw)

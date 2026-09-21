@@ -163,16 +163,29 @@ data/                            dataset loading and partitioning (data/raw is g
 docs/rt_attention_revision.md    notes on the attention revision
 ```
 
-## Server-free circuit-PSI (attn_filter / precision)
+## PSI method names
 
-No party learns any match while the relation table is built; the server only receives the final table.
+All PSI variants build the relation table once, before training. `rt_method` picks the signals,
+`rt_psi` (or `--psi` in the split test) picks the protocol.
+
+| name | `rt_method` / `rt_psi` | signals | who learns matches |
+|---|---|---|---|
+| FPSI-DescFilter [CKKS] | `filter` / `he` | description, then image filter | receiver of each pair |
+| FPSI-AttnImage [CKKS] | `attn_filter` / `he` | keyword attention + image (precision rule) | receiver of each pair |
+| FPSI-AttnText [CKKS] | `attn` / `he` | keyword attention only | receiver of each pair |
+| CPSI-Helper [BFV] | `attn_filter` / `cpsi_helper` | as AttnImage, one PSI message | nobody; server gets final table (helper client deals triples) |
+| CPSI-2PC [VOLE] | `attn_filter` / `cpsi_2pc` | as AttnImage | nobody; server gets final table (no helper) |
+| CPSI-Tag [VOLE] | `attn_filter` / `cpsi_tag` | as AttnImage | nobody; server gets equality tags = pairwise matches, groups itself |
+| PSI-TagHash [OPPRF] | `attn_filter` / `psi_tag_hash` | text, image, verify thresholds (no rival margin) | nobody; server gets hash(tag_text\|tag_image\|tag_verify) = AND bits per branch |
+
+`plain` = same as `he` without crypto (debugging). `circuit`, `vole`, `vole_tag` are accepted as old aliases.
 
 ```bash
 python3 tests/test_circuit_psi_new.py
-python3 test_mnist_split_new.py --device mps --seeds 5 --methods psi_attn_filter --psi circuit
+python3 test_mnist_split_new.py --device mps --seeds 5 --methods psi_attn_filter --psi cpsi_tag
 ```
 
-In the FL run, use `configs/het-iid-exp_rt_circuit_mps_new.yaml` (`rt_psi: circuit`).
+FL configs: `configs/het-iid-exp_rt_cpsi_{helper,2pc,tag}_mps_new.yaml`, `configs/het-iid-exp_rt_psi_tag_hash_mps_new.yaml`.
 
 ## Notes and limitations
 

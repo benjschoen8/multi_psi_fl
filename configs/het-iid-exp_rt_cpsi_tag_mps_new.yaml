@@ -71,7 +71,7 @@ slam_max_relation_order: 2
 
 # ---- RT protocol (server_new.py) ----
 rt_method: attn_filter
-rt_psi: vole
+rt_psi: cpsi_tag
 rt_anchor_datasets: [FashionMNIST, USPS, CIFAR100]
 rt_num_anchors: 300
 rt_min_samples: 10

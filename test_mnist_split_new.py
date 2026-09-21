@@ -100,7 +100,9 @@ def parse():
     ap.add_argument("--archs", default="1,2", help="client model ids from utils.nets, cycled (1=CNN, 2=ResNet8). LeNet(6)/AlexNet(7) fail on mps")
     ap.add_argument("--local_epochs", type=int, default=None, help="default 3 (20 with --per_class)")
     ap.add_argument("--global_epochs", type=int, default=None, help="default 5 (30 with --per_class)")
-    ap.add_argument("--methods", default=",".join(ALL_METHODS))
+    ap.add_argument("--methods", default=",".join(ALL_METHODS),
+                    help="comma list; a PSI method may pick its protocol: psi_attn_filter:cpsi_tag "
+                         "(otherwise --psi). Presets: --methods psi_all")
     ap.add_argument("--seeds", type=int, default=1)
     ap.add_argument("--name_style", default="digit", choices=["digit", "word", "mixed", "multilang"],
                     help="multilang: party 0 English, 1 Chinese, 2 Spanish, ...")
@@ -118,8 +120,14 @@ def parse():
     ap.add_argument("--verify_margin", type=float, default=.01)
     ap.add_argument("--attn_confidence", default="top", choices=["top", "positive"],
                     help="require highest-rung evidence; positive restores permissive matching")
-    ap.add_argument("--psi", default="he", choices=["he", "plain", "circuit", "vole"],
-                    help="circuit: BFV circuit-PSI + helper (model A); vole: VOLE + per-pair 2PC (model C); psi_attn_filter only")
+    ap.add_argument("--psi", default="he", choices=["he", "plain", "cpsi_helper", "cpsi_2pc", "cpsi_tag", "psi_tag_hash"],
+                    help="he: CKKS labeled fuzzy PSI (receiver sees ranks) | plain: no crypto | "
+                         "cpsi_helper: BFV circuit-PSI, helper client | cpsi_2pc: VOLE circuit-PSI, 2PC grouping | "
+                         "cpsi_tag: VOLE circuit-PSI, equality tags, server groups | "
+                         "psi_tag_hash: per-check fuzzy-PSI tags hashed together, no circuit.  cpsi_*/psi_tag_hash: psi_attn_filter only")
+    ap.add_argument("--tag_branches", default="priority", choices=["priority", "text", "both"],
+                    help="psi_tag_hash: priority = strong-text match outranks strong-image-only match (default); "
+                         "text = strong-text branch only; both = plain OR (ablation)")
     ap.add_argument("--encoder_weights", default="DEFAULT", help="'random' to skip the download")
     ap.add_argument("--entropy_ratio", type=float, default=0.25)
     ap.add_argument("--cs_threshold", type=float, default=0.9)
@@ -131,6 +139,12 @@ def parse():
     ap.add_argument("--data_root", default="./data/raw")
     ap.add_argument("--out", default="logs/mnist_split_test")
     a = ap.parse_args()
+    presets = {
+        "psi_all": "psi_filter:he,psi_attn:he,psi_attn_filter:he,psi_attn_filter:cpsi_helper,"
+                   "psi_attn_filter:cpsi_2pc,psi_attn_filter:cpsi_tag,psi_attn_filter:psi_tag_hash,oracle",
+    }
+    presets["all"] = presets["psi_all"] + ",image-bi,feature-bi,image-cs,missing_link"
+    a.methods = presets.get(a.methods, a.methods)
     a.local_epochs = a.local_epochs or (20 if a.per_class else 3)      # few samples -> more epochs, same #steps scale
     a.global_epochs = a.global_epochs or (30 if a.per_class else 5)
     return a
@@ -299,21 +313,23 @@ def run_seed(a, seed, dev, train_ds, test_ds, out):
                 psi["v"] = psi_inputs(a, parties, dev, seed,
                                       need_text=any(m.startswith("psi_attn") for m in a.methods.split(",")))
             clients, owner, P, K_text = psi["v"]
-            meth = method[4:]
+            meth, _, psi_mode = method[4:].partition(":")      # "psi_attn_filter:cpsi_tag" -> per-method protocol
             ld = ([float(v) for v in a.ladder_desc.split(",")] if a.ladder_desc else
                   [0.95, 0.9, 0.85, 0.8] if a.desc_encoder == "char" else
                   np.round(np.arange(0.9, 0.45 - 1e-9, -0.05), 2).tolist())
             lm = ([float(v) for v in a.ladder_attn.split(",")] if a.ladder_attn else
                   np.round(np.arange(0.90, 0.40 - 1e-9, -0.05), 2).tolist())
             ladder = {"desc": ld, "aff": [0.99, 0.985, 0.98, 0.975, 0.97, 0.965, 0.96, 0.955, 0.95], "main": lm}
-            table, _, diagnostics = run_rt_protocol(clients, P, method=meth, psi=a.psi, ladder=ladder, tau=a.tau,
+            table, _, diagnostics = run_rt_protocol(clients, P, method=meth, psi=psi_mode or a.psi,
+                                          **({"tag_branches": a.tag_branches} if (psi_mode or a.psi) == "psi_tag_hash" else {}),
+                                          ladder=ladder, tau=a.tau,
                                           min_samples=0, seed=seed, log=lambda *_: None, K_text=K_text,
                                           coord=a.attn_coord, n_heads=a.attn_heads, attn_match=a.attn_match,
                                           attn_confidence=a.attn_confidence, verify_floor=a.verify_floor,
                                           verify_margin=a.verify_margin)
-            np.savez_compressed(os.path.join(out, f"diagnostics_{method}_seed{seed}.npz"), **diagnostics)
+            np.savez_compressed(os.path.join(out, f"diagnostics_{method.replace(':', '-')}_seed{seed}.npz"), **diagnostics)
             if "review_pairs" in diagnostics:
-                with open(os.path.join(out, f"review_{method}_seed{seed}.csv"), "w", newline="") as f:
+                with open(os.path.join(out, f"review_{method.replace(':', '-')}_seed{seed}.csv"), "w", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(["client_i", "local_label_i", "client_j", "local_label_j", "reason"])
                     reasons = {1: "image_verification_uncertain", 2: "group_consistency_conflict"}
@@ -403,7 +419,7 @@ def run_seed(a, seed, dev, train_ds, test_ds, out):
         rows.append({"seed": seed, "method": method, "f1": m["f1_score"], "precision": m["precision"],
                      "recall": m["recall"], "FP": m["FP"], "FN": m["FN"], "acc_strict": acc_s,
                      "acc_digit": acc_d, "n_gids": n_g, "seconds": round(time.time() - t, 1)})
-        with open(os.path.join(out, f"mapping_{method}_seed{seed}.txt"), "w") as f:
+        with open(os.path.join(out, f"mapping_{method.replace(':', '-')}_seed{seed}.txt"), "w") as f:
             for g in sorted({g for mp in mapping.values() for g in mp.values()}):
                 f.write(f"gid {g}: " + ", ".join(f"{d}:'{lsm[d][l]}'(digit {truth[d][l]})" for d, mp in mapping.items()
                                                  for l, gg in mp.items() if gg == g) + "\n")
@@ -450,9 +466,9 @@ def main():
 
     print(f"\nsplits={a.splits}  per_class={a.per_class or '-'}  names={a.name_style}  desc={a.desc_encoder}  "
           f"seeds={a.seeds}")
-    print(f"{'method':<14}{'F1':>14}{'FP':>8}{'acc_strict %':>18}{'acc_digit %':>18}")
+    print(f"{'method':<36}{'F1':>14}{'FP':>8}{'acc_strict %':>18}{'acc_digit %':>18}")
     for d in summ:
-        print(f"{d['method']:<14}{d['f1_mean']:>7.3f}±{d['f1_std']:<6.3f}{d['FP_mean']:>6.1f}"
+        print(f"{d['method']:<36}{d['f1_mean']:>7.3f}±{d['f1_std']:<6.3f}{d['FP_mean']:>6.1f}"
               f"{d['acc_strict_mean']:>11.2f}±{d['acc_strict_std']:<6.2f}{d['acc_digit_mean']:>11.2f}±{d['acc_digit_std']:<6.2f}")
 
     import matplotlib
