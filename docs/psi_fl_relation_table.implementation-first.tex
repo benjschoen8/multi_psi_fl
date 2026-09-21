@@ -1,0 +1,515 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,algorithm,algpseudocode,setspace,booktabs,array,hyperref,url}
+\algrenewcommand{\algorithmiccomment}[1]{\hfill\textit{\footnotesize // #1}}
+\setlength{\emergencystretch}{2em}
+\makeatletter
+\setlength{\@fptop}{0pt}
+\setlength{\@fpsep}{18pt}
+\makeatother
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\newcommand{\fps}{\textsc{LabeledFuzzyPSI}}
+\newcommand{\psiexact}{\textsc{ExactPSI}}
+\newcommand{\aff}{\mathrm{aff}}
+\newcommand{\onesided}{\textsc{OneSided}}
+\newcommand{\mutual}{\textsc{Mutual}}
+\newcommand{\unit}{\textsc{Unit}}
+\newcommand{\centerunit}{\textsc{CenterUnit}}
+\newcommand{\fprank}{\textsc{FPSIRank}}
+\newcommand{\imagesig}{\textsc{ImageSignals}}
+\newcommand{\bounds}{\textsc{RankBounds}}
+\newcommand{\ind}{\mathbf{1}}
+\title{PSI--FL Relation Table\\\large Implementation-aligned algorithms for offline class alignment}
+\author{}\date{}
+\begin{document}
+\maketitle
+
+\noindent This document distinguishes the conceptual exact-PSI baseline from the
+implemented fuzzy matching procedures in \path{label_mapping/rt_protocol.py}.
+Relation-table construction is an offline preprocessing phase before FL.
+The algorithms use no cross-client ground-truth labels for their decisions.
+The Python experiment simulates the parties centrally; local operations and
+messages below describe their intended deployment roles.
+A correct numerical similarity comparison does not guarantee semantic class
+identity: ambiguous classes may remain unmerged.
+
+\begin{center}\small
+\begin{tabular}{@{}p{.19\textwidth}p{.72\textwidth}@{}}
+\toprule
+Implementation & Procedure in this document \\\midrule
+\texttt{filter} & Description ranks (Algorithm~\ref{alg:a2}), followed by the image-affinity intersection (Algorithm~\ref{alg:a4}).\\
+\texttt{affscan} & Image-affinity profiles directly supply fuzzy PSI (Algorithm~\ref{alg:a3}).\\
+\texttt{attn} & Keyword attention coordinates and confident mutual matching (Algorithm~\ref{alg:a3b}).\\
+\texttt{attn\_filter} & Default \texttt{precision}: text nomination, affinity ranks, full-feature verification, and consistent grouping (Algorithms~\ref{alg:precision} and~\ref{alg:gid}).\\
+Shared steps & Actual image affinity: Algorithm~\ref{alg:affimpl}. Actual CKKS rank comparison: Algorithm~\ref{alg:fpsimpl}.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Notation and eligibility.}
+$C_i$ denotes client $i$'s eligible classes: a local summary exists and the
+sample count meets the public minimum. Ineligible classes still receive
+singleton global ids. $\pi_i$ is the client's private permutation from local
+ids to masked ids; all transmitted pair indices are masked ids. Matrices below
+are ordered by masked id. Local real-id notation is retained only for readability.
+$\Delta_T,\Delta_A,\Delta_V$ are publicly specified ladders for text,
+affinity-profile, and full-feature verification similarities.
+The MNIST harness uses
+\[
+ \Delta_T=\{.90,.85,\ldots,.40\},\qquad
+ \Delta_A=\{.990,.985,\ldots,.950\},
+\]
+\[
+ \Delta_V=\{.50,.55,\ldots,.85\}\cup\{.900,.902,\ldots,.998\}.
+\]
+These are implementation settings, not universal accuracy guarantees. Other
+callers can configure the ladders. An allowed pair receives rank
+\[
+ R[a,b]=\sum_{\delta\in\Delta}\ind\{s_i[a]^\top s_j[b]>\delta\}.
+\]
+Thus $\delta$ is a \emph{similarity threshold}, not a distance tolerance.
+The strict comparison agrees with the implementation.
+
+\clearpage
+\subsection*{Shared subroutines}
+\label{sec:sub}
+\small
+\begin{algorithmic}[1]
+\Procedure{Unit}{$V$}
+ \For{each row $v$ of $V$}
+  \State $v\gets v/\max(\lVert v\rVert_2,10^{-12})$
+ \EndFor
+ \State \Return $V$
+\EndProcedure
+\Statex
+\Procedure{CenterUnit}{$S$}
+ \State \Return $\unit(S-\operatorname{rowmean}(S))$
+\EndProcedure
+\Statex
+\Procedure{OneSided}{$R$}
+ \State $M\gets\emptyset$
+ \For{each row $a$}
+  \State $m\gets\max_b R[a,b]$
+  \If{$m>0$ and the maximizing column $b$ is unique}
+   \State $M\gets M\cup\{(a,b)\}$
+  \EndIf
+ \EndFor
+ \State \Return $M$ \Comment{zero rows and exact ties abstain}
+\EndProcedure
+\Statex
+\Procedure{Mutual}{$R$}
+ \State \Return $\{(a,b)\in\onesided(R):(b,a)\in\onesided(R^\top)\}$
+\EndProcedure
+\Statex
+\Procedure{RankBounds}{$R,\Delta$}
+ \State sort thresholds as $d_1\le\cdots\le d_m$; set $d_0=-1$, $d_{m+1}=1$
+ \For{each pair $(a,b)$ with rank $r=R[a,b]$}
+  \State $L[a,b]\gets d_r$; $U[a,b]\gets d_{r+1}$
+ \EndFor
+ \State \Return $(L,U)$
+\EndProcedure
+\end{algorithmic}
+\small
+\paragraph{Normalization and bounds.}
+Unit normalization removes magnitude; unrelated embedding spaces still need
+alignment. For evaluated, unmasked pairs, $\bounds$ encloses the plaintext
+similarity when threshold bits are exact. CKKS approximation can change bits
+near a threshold, so the bounds are not unconditional certificates for noisy
+decryptions. Experimental diagnostics check plaintext/HE disagreements but
+do not determine matches. A mask-forced zero rank provides no bound and is
+excluded before acceptance.
+
+\paragraph{Code mapping.}
+These helpers implement \texttt{unit}, \texttt{center\_unit},
+\texttt{one\_sided}, \texttt{mutual}, and \texttt{rank\_bounds}.
+Neither tie rejection nor mutual matching guarantees precision.
+
+\paragraph{Experiment group table.}
+After client-level alignment, \texttt{to\_group\_map} applies majority voting
+within a known common party/local-label schema, enforces injective party
+assignments, and renumbers ids. This training adapter supplies no additional
+cross-client semantic evidence.
+\normalsize
+\clearpage
+
+\begin{algorithm}[p]
+\caption{Shared-vocabulary description PSI}
+\label{alg:a1}
+\footnotesize
+\setstretch{0.95}
+\begin{algorithmic}[1]
+
+\Statex \hrulefill
+\Statex \textbf{STATUS.} Conceptual exact-PSI baseline; not implemented by \texttt{run\_rt\_protocol}.
+\Statex \textbf{ASSUMPTION.} There exists a shared vocabulary $W$: a
+        published list of keywords/phrases that every client draws on when
+        describing what a class \emph{is}. Every client's description of the
+        same real-world concept is therefore built from the same word pool,
+        so identical concepts tend to yield identical or overlapping
+        description strings.
+
+\Statex \textbf{OBJECTS}
+\Statex \quad $C_i$ \quad client $i$'s local set of classes (real ids).
+\Statex \quad $\pi_i$ \quad client $i$'s private permutation
+        $\mathrm{id} \mapsto \mathrm{masked\_id}$. Only masked ids ever leave
+        client $i$.
+\Statex \quad $W$ \quad the shared public vocabulary.
+\Statex \quad $\mathrm{desc}_i[a] \subseteq W$ \quad the keyword(s) client $i$
+        attaches to class $a$, describing it.
+
+\Statex \hrulefill
+\Statex \textbf{PHASE 1 --- build the local table. Local only; no
+        communication.}
+\For{each client $i$}
+  \For{each class $a \in C_i$}
+    \State $\mathrm{masked\_id} \gets \pi_i(a)$
+    \State choose $\mathrm{desc}_i[a] \subseteq W$: the keywords that
+           describe class $a$
+    \State $\mathrm{Table}_i \gets \mathrm{Table}_i \cup
+           \{(a,\ \mathrm{masked\_id},\ \mathrm{desc}_i[a])\}$
+      \Comment{the local $|\mathrm{id}|\mathrm{masked\_id}|\mathrm{description}|$
+               table}
+  \EndFor
+\EndFor
+
+\Statex \hrulefill
+\Statex \textbf{PHASE 2 --- PSI on descriptions. Between each client pair; no
+        aggregator.}
+\For{each client pair $(i,j)$, $i<j$}
+  \State $E_{ij} \gets \emptyset$
+  \State run $\psiexact$ between $\{\mathrm{desc}_i[a] : a \in C_i\}$ and
+         $\{\mathrm{desc}_j[b] : b \in C_j\}$
+    \Comment{plain PSI: reveals only which description strings are shared,
+             not the descriptions of the non-matching classes}
+  \For{each matched description $d$, held by class $a$ at $i$ and class $b$
+       at $j$}
+    \State $E_{ij} \gets E_{ij} \cup \{(\pi_i(a),\, \pi_j(b))\}$
+      \Comment{a masked-id-to-masked-id relation -- never real ids}
+  \EndFor
+\EndFor
+\State $E \gets \bigcup_{i<j}\{(i,\hat a,j,\hat b,1):(\hat a,\hat b)\in E_{ij}\}$
+\State \Return $E$
+  \Comment{this is what is handed to the aggregation server -- see
+           Algorithm~\ref{alg:gid}}
+\Statex \hrulefill
+
+\end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[p]
+\caption{Fuzzy description PSI followed by the original image-affinity filter}
+\label{alg:a2}
+\small\begin{algorithmic}[1]
+\Require eligible classes $C_i$, descriptions $d_i[a]$, aligned text encoders, $\Delta_T,\Delta_A$
+\Ensure weighted masked-id candidate relations $E$
+\Statex \textbf{Local preparation.}
+\For{each client $i$}
+ \For{each $a\in C_i$}
+  \State choose description $d_i[a]$ and compute its embedding $t_i[a]$
+  \State store $(a,\pi_i(a),d_i[a])$ locally
+ \EndFor
+ \State $t_i\gets\unit(t_i)$
+ \State $(s_i,v_i)\gets\imagesig(i)$ \Comment{Algorithm~\ref{alg:affimpl}}
+\EndFor
+\Statex \textbf{Pairwise matching.}
+\State $E\gets\emptyset$
+\For{each client pair $i<j$}
+ \State $R_T\gets\fprank(t_i,t_j,\Delta_T,\mathbf{1})$
+ \State $E'_{ij}\gets\mutual(R_T)$
+ \State $(E_{ij},R_A)\gets\textsc{ImageAffinityFilter}(E'_{ij},s_i,s_j,\Delta_A)$
+ \State add $(i,\pi_i(a),j,\pi_j(b),R_T[a,b]+R_A[a,b])$ to $E$ for $(a,b)\in E_{ij}$
+\EndFor
+\State \Return $E$ to Algorithm~\ref{alg:gid}
+\Statex \hrulefill
+\Statex \raggedright\textbf{IMPLEMENTATION.} \texttt{method="filter"}. The code uses supplied
+\texttt{desc\_vecs}, or character 1--3-gram hashing if none are supplied. The
+MNIST semantic baseline averages individually encoded description keywords
+before normalization. Unlike anchor-indexed attention, this direct-description
+baseline requires aligned encoder coordinates for a meaningful dot product.
+\end{algorithmic}\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{Affinity-generated descriptions: image profiles directly drive fuzzy PSI}
+\label{alg:a3}
+\small\begin{algorithmic}[1]
+\Require eligible local image sets $X_i^a$, common public image encoder $F$, ordered public probes $P$, $\Delta_A$
+\Ensure weighted masked-id relations $E$
+\Statex \textbf{Local preparation.}
+\For{each client $i$}
+ \State $(s_i,v_i)\gets\imagesig(i)$ \Comment{actual cosine construction: Algorithm~\ref{alg:affimpl}}
+ \For{each $a\in C_i$}
+  \State store $(a,\pi_i(a),s_i[a])$ locally
+ \EndFor
+\EndFor
+\Statex \textbf{Pairwise matching.}
+\State $E\gets\emptyset$
+\For{each client pair $i<j$}
+ \State $R_A\gets\fprank(s_i,s_j,\Delta_A,\mathbf{1})$
+ \State $M_{ij}\gets\mutual(R_A)$
+ \State add $(i,\pi_i(a),j,\pi_j(b),R_A[a,b])$ to $E$ for $(a,b)\in M_{ij}$
+\EndFor
+\State \Return $E$ to Algorithm~\ref{alg:gid}
+\Statex \hrulefill
+\Statex \raggedright\textbf{IMPLEMENTATION.} \texttt{method="affscan"}. The fuzzy-PSI inputs
+are normalized \emph{affinity-profile vectors}, not raw images, names, or
+individual probe labels. Text is unused. This is a visual-only baseline;
+Algorithm~\ref{alg:a3b} instead derives its queries from class descriptions.
+\end{algorithmic}\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{Keyword attention coordinates used by the implementation}
+\label{alg:a3b}
+\footnotesize\begin{algorithmic}[1]
+\Require ordered public text anchors $A$, client-local text encoder $E_i$, keyword lists $D_i[a]$, $\tau>0$
+\Ensure text coordinates $z_i[a]$ indexed by the public anchor list
+\For{each client $i$}
+ \State $K_i\gets\unit([E_i(w)]_{w\in A})$; $n\gets|C_i|$
+ \State $K_{c,i}\gets K_i-\operatorname{columnmean}(K_i)$
+ \State compute compact SVD $K_{c,i}=U\Sigma V^\top$
+ \State retain singular values $\sigma>\max(10^{-6}\sigma_{\max},10^{-12})$
+ \State $W_i\gets U_{\rm keep}\Sigma_{\rm keep}^{-1}U_{\rm keep}^\top$
+ \State $\mathrm{df}_i(w)\gets|\{a\in C_i:w\in D_i[a]\}|$
+ \For{each class $a\in C_i$}
+  \State encode every keyword separately: $q_k\gets\unit(E_i(D_i[a]_k))$
+  \State $c_a(w)\gets$ multiplicity of keyword $w$ in $D_i[a]$
+  \State $\widetilde w_k\gets\log(n/\mathrm{df}_i(D_i[a]_k))/c_a(D_i[a]_k)$
+  \If{all $\widetilde w_k=0$}
+   \State $\widetilde w_k\gets1/c_a(D_i[a]_k)$ for every keyword
+  \EndIf
+  \State $w_k\gets\widetilde w_k/\sum_\ell\widetilde w_\ell$
+  \State $\alpha_k\gets\operatorname{softmax}(q_kK_i^\top/\tau)$ for each keyword
+  \State $\bar\alpha_i[a]\gets\sum_k w_k\alpha_k$
+  \State $\ell_i[a]\gets\log(\max(\bar\alpha_i[a],\varepsilon_{\rm tiny}))$ elementwise
+  \State $z_i[a]\gets\unit((\ell_i[a]-\operatorname{mean}(\ell_i[a]))W_i)$
+ \EndFor
+\EndFor
+\Statex \textbf{Standalone \texttt{attn} matching.}
+\For{each pair $i<j$}
+ \State $R_T\gets\fprank(z_i,z_j,\Delta_T,\mathbf{1})$
+ \State $R_T[a,b]\gets0$ wherever $R_T[a,b]<|\Delta_T|$
+ \State emit masked relations from $\mutual(R_T)$, weighted by $R_T[a,b]$
+\EndFor
+\Statex \hrulefill
+\Statex \raggedright\textbf{IMPLEMENTATION.} \texttt{keyword\_attn} and
+\texttt{anchor\_log\_coordinates}, default \texttt{coord="log\_whiten"}, one head.
+With legacy \texttt{desc\_vecs}, a whole description is one query and receives
+weight 1; without keyword metadata, weights are uniform. No projection head or
+keyword weights are trained. Different text encoders embed the same anchor
+\emph{list}; identical numerical keys are not required. This shared indexing
+does not guarantee semantic alignment of arbitrary encoders. With one active
+keyword, the corrected coordinate is an anchor-span projection.
+\end{algorithmic}\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{Image-affinity intersection filter: original cascade}
+\label{alg:a4}
+\small\begin{algorithmic}[1]
+\Require text candidate pairs $E'_{ij}$; full affinity profiles $s_i,s_j$ from Algorithm~\ref{alg:affimpl}; $\Delta_A$
+\Ensure surviving pairs and their affinity ranks
+\Procedure{ImageAffinityFilter}{$E'_{ij},s_i,s_j,\Delta_A$}
+ \State $I\gets\{a:(a,b)\in E'_{ij}\}$; $J\gets\{b:(a,b)\in E'_{ij}\}$
+ \State $M[a,b]\gets\ind\{a\in I\ \text{and}\ b\in J\}$
+ \State $R_A\gets\fprank(s_i,s_j,\Delta_A,M)$
+ \State \Return $(E'_{ij}\cap\mutual(R_A),R_A)$
+\EndProcedure
+\Statex \hrulefill
+\Statex \raggedright\textbf{IMPLEMENTATION.} This is the filter stage of
+\texttt{method="filter"}, and the legacy
+\texttt{method="attn\_filter"} with \texttt{attn\_match="intersection"} path.
+The mask covers the Cartesian product of candidate endpoint sets, not only the
+original candidate edges. Mutual matching is evaluated in that masked matrix.
+Pairs rejected by the earlier text stage cannot be recovered by this cascade.
+The current precision-mode replacement is Algorithm~\ref{alg:precision}.
+\Statex
+\Statex \textbf{ACTUAL AFFINITY.} The implemented signal is the cosine profile
+from Algorithm~\ref{alg:affimpl}. It is not an unspecified classifier score,
+$k$NN fraction, posterior, or affinity learned from the other client's labels.
+\end{algorithmic}\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{Actual image-affinity construction supplied to fuzzy PSI}
+\label{alg:affimpl}
+\small\begin{algorithmic}[1]
+\Require common frozen image encoder $F$, ordered public unlabeled probes $P=\{p_1,\ldots,p_m\}$
+\Require client $i$'s private selected samples $X_i^a$ for each eligible class $a$
+\Ensure normalized affinity profiles $s_i[a]$ and full-feature vectors $v_i[a]$
+\Procedure{ImageSignals}{$i$}
+ \State compute public features $f_p\gets F(p)$ for each $p\in P$
+ \State $\mu\gets m^{-1}\sum_{p\in P}f_p$; $h_p\gets f_p-\mu$
+ \For{each $a\in C_i$}
+  \State $r_i(a)\gets |X_i^a|^{-1}\sum_{x\in X_i^a}F(x)-\mu$
+    \Comment{accumulate in batches locally}
+  \State $v_i[a]\gets r_i(a)/\max(\|r_i(a)\|_2,10^{-12})$
+  \For{each public probe $p$}
+   \State $S_i[a,p]\gets v_i[a]^\top h_p/\max(\|h_p\|_2,10^{-12})$
+   \Comment{$\aff_i(a,p)$}
+  \EndFor
+  \State $s_i[a]\gets\unit(S_i[a]-m^{-1}\sum_{p\in P}S_i[a,p])$
+ \EndFor
+ \State \Return $(s_i,v_i)$
+\EndProcedure
+\Statex \hrulefill
+\Statex \textbf{TWO DISTINCT SIMILARITIES.}
+\Statex \quad Local probe affinity: $\aff_i(a,p)=\cos(r_i(a),h_p)$.
+\Statex \quad Cross-client profile similarity tested by fuzzy PSI:
+\Statex \qquad $c_A(a,b)=s_i[a]^\top s_j[b]$.
+\Statex \quad Additional precision-mode verification similarity:
+\Statex \qquad $c_V(a,b)=v_i[a]^\top v_j[b]$.
+\Statex
+\Statex The protocol does not compare a class directly with another client's
+raw images. Public probe labels are never used. The two visual signals share
+the same encoder and samples; they are complementary representations, not
+statistically independent evidence.
+\Statex
+\Statex \raggedright\textbf{IMPLEMENTATION.} \texttt{aff\_profile(R,P)} computes
+$\unit(R)\unit(P)^\top$ on already public-mean-centered features;
+\texttt{center\_unit} then normalizes its rows. The MNIST harness uses a shared
+pretrained ResNet-18 with the classifier head removed and consistent image
+preprocessing. Legacy summaries use at most 64 samples/class; precision mode
+uses \texttt{precision\_summ} from all available samples, falling back to the
+supplied \texttt{summ} if absent. The server setting
+\texttt{rt\_exemplars\_per\_class=0} also selects all available samples.
+\end{algorithmic}\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{Implemented CKKS labeled fuzzy-PSI rank comparison}
+\label{alg:fpsimpl}
+\footnotesize\begin{algorithmic}[1]
+\Require normalized rows $s_i[a],s_j[b]$ in a compatible coordinate space, ladder $\Delta$, allowed mask $M$
+\Ensure masked pairwise rank matrix $R$, subsequently used by $\mutual$
+\Procedure{FPSIRank}{$s_i,s_j,\Delta,M$}
+ \State receiver $j$ generates a CKKS context and retains its secret key
+ \State $j$ sends the public context and encrypted, column-packed coordinates of $s_j$
+ \State $R\gets0$
+ \For{each sender-row block and each pair $(a,b)$ represented by its slots}
+  \State sender $i$ evaluates $\widehat c_{ab}\gets\sum_{k=1}^{d}s_i[a,k]\,\operatorname{Enc}_j(s_j[b,k])$
+  \For{each $\delta\in\Delta$}
+   \State $r_{ab\delta}\gets\operatorname{Uniform}(1,1000)$ independently
+   \State $\widehat u_{ab\delta}\gets(\widehat c_{ab}-\delta)\,r_{ab\delta}\,M[a,b]$
+   \State $i$ sends packed $\widehat u_{ab\delta}$ to receiver $j$
+   \State $j$ decrypts $u_{ab\delta}$ and sets $B_\delta[a,b]\gets M[a,b]\ind\{u_{ab\delta}>0\}$
+   \State $R[a,b]\gets R[a,b]+B_\delta[a,b]$
+  \EndFor
+ \EndFor
+ \State $j$ returns $R$ to $i$; \Return $R$
+\EndProcedure
+\Statex \hrulefill
+\Statex \textbf{PLAINTEXT REFERENCE.}
+$\fprank(s_i,s_j,\Delta,M)=M\odot\sum_{\delta\in\Delta}\ind\{s_is_j^\top>\delta\}$.
+This is \texttt{fpsi\_rank\_plain}; it is a debugging/reference mode, not private PSI.
+\Statex
+\Statex \raggedright\textbf{PACKING.} \texttt{FPSIReceiver} uses polynomial modulus degree
+8192 (4096 slots), coefficient-modulus bits $[60,40,40,60]$, and scale $2^{40}$.
+For $n_j$ receiver classes, each coordinate column repeats $\lfloor4096/n_j\rfloor$
+times. Sender row blocks repeat their coordinate over each receiver class.
+The loop above is written slotwise for clarity; encrypted products are batched.
+\Statex
+\Statex \textbf{LEAKAGE AND NUMERICS.} The receiver sees masked decrypted
+magnitudes $u$, not merely match bits. The parties also learn ranks, class
+counts, and the masking/selection information needed for the next stage.
+Finite-range multipliers do not constitute a proof of ideal ``bits-only''
+leakage. CKKS is approximate and can disagree with the strict plaintext
+comparison near a threshold. Finer ladders disclose finer similarity ranges
+and increase computation/communication. These limitations apply to the
+implemented semi-honest prototype; no exact cryptographic PSI guarantee is claimed.
+\Statex
+\Statex \textbf{CALLERS.} Algorithms~\ref{alg:a2}--\ref{alg:affimpl} supply
+text or affinity-coordinate vectors. Algorithm~\ref{alg:precision} additionally
+supplies full image-feature vectors. Only the vectors and ladder change;
+the encrypted threshold mechanism is the same.
+\end{algorithmic}\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{Precision-first attention--affinity preprocessing: current \texttt{psi\_attn\_filter}}
+\label{alg:precision}
+\footnotesize\begin{algorithmic}[1]
+\Require $z_i$ from Algorithm~\ref{alg:a3b}, $(s_i,v_i)$ from Algorithm~\ref{alg:affimpl}
+\Require ladders $\Delta_T,\Delta_A,\Delta_V$; verification floor $\eta=.90$, margin $\gamma=.01$
+\Ensure weighted edges $E$, supported pair set $H$, uncertain candidates for local review
+\State $E,H\gets\emptyset$
+\For{each client pair $i<j$}
+ \State $R_T\gets\fprank(z_i,z_j,\Delta_T,\mathbf{1})$
+ \State $M[a,b]\gets\ind\{R_T[a,b]>0\}$
+ \State $R_A\gets\fprank(s_i,s_j,\Delta_A,M)$ \Comment{zero if no allowed pairs}
+ \State $R_V\gets\fprank(v_i,v_j,\Delta_V,\mathbf{1})$ \Comment{all competitors, unmasked}
+ \State $(L_T,U_T)\gets\bounds(R_T,\Delta_T)$
+ \State $(L_A,U_A)\gets\bounds(R_A,\Delta_A)$; $(L_V,U_V)\gets\bounds(R_V,\Delta_V)$
+ \State $B\gets0$; $G\gets0$
+ \For{each pair $(a,b)$}
+  \State $T\gets[L_T[a,b]\ge\max\Delta_T]$; $I\gets[L_A[a,b]\ge\max\Delta_A]$
+  \If{$R_T[a,b]=0$ or $R_A[a,b]=0$ or $\neg(T\lor I)$ or $L_V[a,b]<\eta$}
+   \State \textbf{continue}
+  \EndIf
+  \State $q\gets\max(\{U_V[a,b']:b'\ne b\}\cup\{U_V[a',b]:a'\ne a\}\cup\{-1\})$
+  \If{$(T\land L_V[a,b]\ge q-\gamma)$ or $(\neg T\land L_V[a,b]\ge q+\gamma)$}
+   \State $B[a,b]\gets1$; $G[a,b]\gets(L_T[a,b]+L_A[a,b]+L_V[a,b])/3$
+   \State add the masked unordered pair $\{(i,\pi_i(a)),(j,\pi_j(b))\}$ to $H$
+  \EndIf
+ \EndFor
+ \State add $(i,\pi_i(a),j,\pi_j(b),G[a,b])$ to $E$ for $(a,b)\in\mutual(G)$
+ \State record strongly nominated pairs failing verification as uncertain, not as confirmed errors
+\EndFor
+\State \Return $(E,H)$ to Algorithm~\ref{alg:gid}; retain review records locally
+\Statex \hrulefill
+\Statex \raggedright\textbf{IMPLEMENTATION.} \texttt{attn\_match="precision"},
+\texttt{verified\_candidates}, and \texttt{rank\_bounds}. Confidence and margins
+use only threshold ranks. $R_V$ must include every image-feature rival: hiding
+rivals before checking the margin could create artificial confidence.
+Strong text may resolve visually close alternatives within $\gamma$;
+weak-text image rescue instead requires a margin of $\gamma$ over all rivals.
+The image-feature floor applies in both cases.
+\Statex
+\Statex \textbf{PREVIOUS FUSION ABLATION.} With \texttt{attn\_match="fusion"},
+there is no $R_V$ or complete-link check. Positive text and affinity ranks, with
+at least one highest-rung rank, receive score
+$R_T|\Delta_A|+R_A|\Delta_T|$, then undergo mutual matching.
+Precision mode is a deliberate extension of that earlier procedure.
+\end{algorithmic}\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{Global relation table with optional complete-link verification; subsequent FL queries}
+\label{alg:gid}
+\small\begin{algorithmic}[1]
+\Require weighted masked edges $E$, every client's full masked-id list
+\Require optional supported-pair set $H$ from Algorithm~\ref{alg:precision}
+\State initialize each $(i,\hat a)$ as a singleton union--find component
+\For{each edge $(i,\hat a,j,\hat b,w)$ in decreasing order of $w$}
+ \State let $A,B$ be the endpoint components
+ \If{$A=B$}
+  \State \textbf{continue}
+ \EndIf
+ \If{$A$ and $B$ contain ids from the same client}
+  \State reject this merge
+ \ElsIf{$H$ is supplied and some $u\in A,v\in B$ satisfy $\{u,v\}\notin H$}
+  \State reject this merge and record the consistency conflict
+ \Else
+  \State merge $A$ and $B$
+ \EndIf
+\EndFor
+\State assign one global id to every resulting component, including singletons
+\State \Return $\mathrm{GlobalTable}=|\mathrm{global\_id}|\mathrm{client\_id}|\mathrm{masked\_id}|$
+\Statex \hrulefill
+\Statex \textbf{FEDERATED LEARNING: reuse the completed table.}
+\For{each global class $g$ used in a training round}
+ \For{each $(i,\hat a)$ assigned to $g$}
+  \State aggregator queries client $i$ with masked id $\hat a$
+  \State client $i$ resolves its real id locally as $a=\pi_i^{-1}(\hat a)$
+  \State client returns the authorized class update/statistic tagged with $\hat a$
+ \EndFor
+ \State aggregator combines the updates for $g$
+\EndFor
+\Statex \hrulefill
+\Statex \raggedright\textbf{IMPLEMENTATION.} \texttt{global\_table}. With $H$, a transitive
+path alone is insufficient: every cross-component pair needs support. This
+can reduce recall under noisy or sparse observations. The precision path
+removes rejected edges from its returned edge list and exports review records.
+A singleton may be a genuinely private class or an unresolved shared class.
+\Statex
+\Statex \textbf{DISCLOSURE.} Enforcing the complete-link rule requires the
+aggregator to access the supported masked-pair relation $H$ in addition to
+selected edges. The simulation passes this relation directly; a deployment
+must account for this additional disclosed relation, as well as the extra
+full-feature ranks from Algorithm~\ref{alg:precision}.
+\end{algorithmic}\end{algorithm}
+\end{document}

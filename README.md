@@ -32,7 +32,8 @@ python3 -c "import torchvision; torchvision.models.resnet18(weights='DEFAULT')"
 python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
 
 # 4. run the main comparison (Apple-silicon GPU, small scale)
-bash run_mac_global_acc_new.sh 10 5 3
+bash run_mac_global_acc_new.sh 10 5 3          # device auto: cuda:0 > mps > cpu
+bash run_mac_global_acc_new.sh 10 5 3 cpu      # force CPU
 ```
 
 The plots land in `plot/global_accuracy_plots/mac_r10_s5_c3_psi/`.
@@ -41,7 +42,7 @@ The plots land in `plot/global_accuracy_plots/mac_r10_s5_c3_psi/`.
 
 | Goal | Command | Hardware |
 |---|---|---|
-| Global-model accuracy: 3 PSI versions vs 4 baselines (small scale) | `bash run_mac_global_acc_new.sh [ROUNDS=10] [START=5] [CLIENTS_PER_DATASET=3]` | Mac `mps` |
+| Global-model accuracy: 5 PSI versions vs 4 baselines (small scale) | `bash run_mac_global_acc_new.sh [ROUNDS=10] [START=5] [CLIENTS_PER_DATASET=3] [DEVICE=auto]` | any (cuda / mps / cpu) |
 | Global accuracy + mapping metrics, full scale | `bash run_rt_new.sh [START=25] [DEVICE=cuda:0]` | NVIDIA / ROCm GPU |
 | New-client fine-tuning comparison | `bash run_newclient_psi_new.sh [START=25] [DEVICE=cuda:0] [EPOCHS=30]` | NVIDIA / ROCm GPU |
 | Mapping-only test on MNIST digit subsets (no FL, minutes) | `python3 test_mnist_split_new.py --device mps --seeds 5` | any |
@@ -161,6 +162,17 @@ configs/                         base config + RT configs (*_new.yaml)
 data/                            dataset loading and partitioning (data/raw is git-ignored)
 docs/rt_attention_revision.md    notes on the attention revision
 ```
+
+## Server-free circuit-PSI (attn_filter / precision)
+
+No party learns any match while the relation table is built; the server only receives the final table.
+
+```bash
+python3 tests/test_circuit_psi_new.py
+python3 test_mnist_split_new.py --device mps --seeds 5 --methods psi_attn_filter --psi circuit
+```
+
+In the FL run, use `configs/het-iid-exp_rt_circuit_mps_new.yaml` (`rt_psi: circuit`).
 
 ## Notes and limitations
 

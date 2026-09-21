@@ -17,6 +17,8 @@ Outputs in log_dir:
 exp_conf keys (all optional):
   rt_method              'filter'   'filter' | 'affscan' | 'attn' | 'attn_filter'
   rt_psi                 'he'       'he' (CKKS, needs `pip install tenseal`) | 'plain' (debug)
+                                     | 'circuit' (server-free fuzzy circuit-PSI; attn_filter/precision only)
+                                     | 'vole' (VOLE circuit-PSI, per-pair 2PC, no helper client)
   rt_anchor_datasets     [FashionMNIST, USPS, CIFAR100]  public probes, TEST split; must not be used by any client
   rt_num_anchors         300
   rt_exemplars_per_class 64
@@ -50,7 +52,8 @@ from tqdm import tqdm
 
 from trainer.GeFL_gan_pacfl_iid.server import Server as OldServer
 from label_mapping.label_mapping_utils import global_to_local_mapping
-from label_mapping.rt_protocol import LADDER, run_rt_protocol, to_group_map, pair_metrics, TEXT_ANCHORS
+from label_mapping.rt_protocol import LADDER, to_group_map, pair_metrics, TEXT_ANCHORS
+from label_mapping.circuit_psi_new import run_rt_protocol   # psi='circuit' -> server-free circuit-PSI
 from label_mapping.rt_descriptions import keywords, LANGS
 from data.datasets import get_raw_dataset_transform
 

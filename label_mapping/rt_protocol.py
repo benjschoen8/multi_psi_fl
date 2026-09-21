@@ -1,20 +1,22 @@
 """
 RT (relation-table) protocol, run ONCE before FL training.
 
-psi_fl_relation_table.tex (labels -> rendered numbers: a1=1, a2=2, a3=3, a3b=4, a4=5, gid=6)
+psi_fl_relation_table.tex: abstract exact PSI (1), exact-description relations (2),
+    fuzzy PSI (3), affinity-profile relations (4), image filter (5),
+    keyword attention (6), precision-first matching (7).
 
-method="filter"  (default) Alg.2 fuzzy description PSI  ->  Alg.5 (\\label{alg:a4}) image-set
-                 affinity filter. A pair survives only if BOTH signals agree.
-method="affscan" Alg.3: affinity profile over public probes as the only signal.
-method="attn"    Alg.4 (\\label{alg:a3b}) on DESCRIPTIONS: r_i(a)=enc_i(description of a) attended over the
-                 PUBLIC TEXT anchor word list (TEXT_ANCHORS). Each client embeds the anchor words with ITS
-                 OWN encoder (K_i = enc_i(anchors), clients[i]["anchor_vecs"]), so the only thing agreed in
-                 advance is the anchor LIST: alpha is indexed by anchor, comparable across clients even when
-                 their encoders / languages differ. Corrected log-attention coordinates
-                 -> fuzzy PSI -> confident Mutual. No images.
-method="attn_filter"  positive text ranks gate image PSI; normalized rank fusion requires
-                 highest-rung support in at least one modality, then Mutual. This extends
-                 the original cascade: attn_match="intersection" restores Alg.5 filtering.
+method="filter"  (default) Direct-description fuzzy PSI -> Alg.5 image filter.
+                 This is not the conceptual exact-PSI baseline of Alg.2.
+method="affscan" Alg.4: affinity profile over public probes as the only signal.
+method="attn"    Alg.6: separately encoded description keywords attend to a
+                 PUBLIC TEXT anchor list, embedded with each client's encoder.
+                 Corrected log-attention coordinates -> fuzzy PSI -> confident
+                 Mutual. No images. Shared anchor indexing alone does not
+                 guarantee alignment of arbitrary encoders.
+method="attn_filter"  default precision mode: text-gated affinity PSI, full-image-feature
+                 PSI verification with bounds/margins, Mutual and complete-link grouping.
+                 attn_match="fusion" retains normalized rank fusion; "intersection"
+                 restores the original Alg.5 filtering cascade.
 Aggregator       alg:gid union-find (same-client constraint).
 
 LabeledFuzzyPSI (psi="he"): CKKS / TenSEAL, semi-honest.
@@ -467,6 +469,11 @@ def run_rt_protocol(clients, P, method="filter", psi="he", ladder=LADDER, tau=No
     log_whiten requires one head. attn_match=fusion combines text/image ranks
     before Mutual; intersection reproduces the old attn_filter cascade and
     does not apply attn_confidence.
+    Default precision additionally uses unit image summaries in the COMMON
+    public image-encoder space, fine verification ranks and complete-link
+    support. precision_summ overrides summ for this mode when available.
+    It uses its own highest-rung policy rather than attn_confidence. Review
+    pairs carry reason 1 (image uncertainty) or 2 (group consistency conflict).
     Fusion requests image ranks for all positive text pairs, exposing more
     image ranks than the original cascade. No raw similarity tie-break is used.
     attn_confidence=top requires exceeding the highest ladder threshold in at

@@ -56,7 +56,8 @@ from data.datasets import get_raw_dataset_transform
 from label_mapping.label_mapping_utils import (
     label_mapping, single_direction_label_mapping, feature_bi_direction_label_mapping,
     image_cosine_similarity_mapping, missing_link_label_mapping, get_real_images, clear_image_caches)
-from label_mapping.rt_protocol import run_rt_protocol, to_group_map, pair_metrics, TEXT_ANCHORS
+from label_mapping.rt_protocol import to_group_map, pair_metrics, TEXT_ANCHORS
+from label_mapping.circuit_psi_new import run_rt_protocol
 from utils.nets import get_heterogeneous_model
 
 ALL_METHODS = ["psi_filter", "psi_affscan", "psi_attn", "psi_attn_filter", "image-bi", "image-single",
@@ -117,7 +118,8 @@ def parse():
     ap.add_argument("--verify_margin", type=float, default=.01)
     ap.add_argument("--attn_confidence", default="top", choices=["top", "positive"],
                     help="require highest-rung evidence; positive restores permissive matching")
-    ap.add_argument("--psi", default="he", choices=["he", "plain"])
+    ap.add_argument("--psi", default="he", choices=["he", "plain", "circuit", "vole"],
+                    help="circuit: BFV circuit-PSI + helper (model A); vole: VOLE + per-pair 2PC (model C); psi_attn_filter only")
     ap.add_argument("--encoder_weights", default="DEFAULT", help="'random' to skip the download")
     ap.add_argument("--entropy_ratio", type=float, default=0.25)
     ap.add_argument("--cs_threshold", type=float, default=0.9)
