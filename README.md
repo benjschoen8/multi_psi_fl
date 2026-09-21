@@ -33,7 +33,6 @@ python3 -c "from sentence_transformers import SentenceTransformer; SentenceTrans
 
 # 4. run the main comparison (Apple-silicon GPU, small scale)
 bash run_mac_global_acc_new.sh                       # original settings: 45 rounds, all global models from round 25, 10 clients/dataset, all data
-bash run_mac_global_acc_new.sh 25 15 3 mps "" 2000   # Mac-sized: 25 rounds, all from round 15, 3 clients, 2000 samples/client
 ```
 
 The plots land in `plot/global_accuracy_plots/mac_r10_s5_c3_psi/`.
