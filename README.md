@@ -32,8 +32,8 @@ python3 -c "import torchvision; torchvision.models.resnet18(weights='DEFAULT')"
 python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
 
 # 4. run the main comparison (Apple-silicon GPU, small scale)
-bash run_mac_global_acc_new.sh 10 5 3          # device auto: cuda:0 > mps > cpu
-bash run_mac_global_acc_new.sh 10 5 3 cpu      # force CPU
+bash run_mac_global_acc_new.sh                       # original settings: 45 rounds, all global models from round 25, 10 clients/dataset, all data
+bash run_mac_global_acc_new.sh 25 15 3 mps "" 2000   # Mac-sized: 25 rounds, all from round 15, 3 clients, 2000 samples/client
 ```
 
 The plots land in `plot/global_accuracy_plots/mac_r10_s5_c3_psi/`.
@@ -42,7 +42,7 @@ The plots land in `plot/global_accuracy_plots/mac_r10_s5_c3_psi/`.
 
 | Goal | Command | Hardware |
 |---|---|---|
-| Global-model accuracy: 5 PSI versions vs 4 baselines (small scale) | `bash run_mac_global_acc_new.sh [ROUNDS=10] [START=5] [CLIENTS_PER_DATASET=3] [DEVICE=auto]` | any (cuda / mps / cpu) |
+| Global-model accuracy: 7 PSI versions vs 4 baselines | `bash run_mac_global_acc_new.sh [ROUNDS=45] [START=25] [CLIENTS_PER_DATASET=10] [DEVICE=auto] [WARMUP=START-1] [CAP=0]` | any (cuda / mps / cpu) |
 | Global accuracy + mapping metrics, full scale | `bash run_rt_new.sh [START=25] [DEVICE=cuda:0]` | NVIDIA / ROCm GPU |
 | New-client fine-tuning comparison | `bash run_newclient_psi_new.sh [START=25] [DEVICE=cuda:0] [EPOCHS=30]` | NVIDIA / ROCm GPU |
 | Mapping-only test on MNIST digit subsets (no FL, minutes) | `python3 test_mnist_split_new.py --device mps --seeds 5` | any |

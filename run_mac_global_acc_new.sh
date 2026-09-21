@@ -1,22 +1,33 @@
 #!/bin/bash
-# Global-model accuracy: PSI vs baseline mappings, small scale. Originals untouched.
-# Usage: bash run_mac_global_acc_new.sh [ROUNDS=10] [START=5] [CLIENTS_PER_DATASET=3] [DEVICE=auto]
-# DEVICE: auto (cuda:0 > mps > cpu) | cpu | mps | cuda:0 | cuda:1 ...
-# START = round the BASELINES start mapping + global model; PSI always starts at round 1.
+# Global-model accuracy: PSI vs baseline mappings. Defaults = original paper settings
+# (configs/het-iid-exp.yaml + main.py): 45 rounds, 10 clients per dataset, all samples,
+# baselines build their mapping and start the global model at round 25.
+# Usage: bash run_mac_global_acc_new.sh [ROUNDS=45] [START=25] [CLIENTS_PER_DATASET=10] [DEVICE=auto] [WARMUP=START-1] [CAP=0]
+#   START  = round the BASELINES build their mapping + start the global model (original: 25)
+#   WARMUP = generator-only rounds before the PSI global models start (default START-1: PSI starts at
+#            START, same round as the baselines; PSI tables still exist before round 1)
+#   CAP    = max training samples per client (0 = all, original)
+#   DEVICE = auto (cuda:0 > mps > cpu) | cpu | mps | cuda:N
+# Mac-sized example: bash run_mac_global_acc_new.sh 25 15 3 mps "" 2000
 set -e
-ROUNDS=${1:-10}
-START=${2:-5}
-NC=${3:-3}
+ROUNDS=${1:-45}
+START=${2:-25}
+NC=${3:-10}
 DEVICE=${4:-auto}
+WARMUP=${5:-$((START - 1))}
+CAP=${6:-0}
+[ "$WARMUP" -lt "$START" ] || { echo "WARMUP ($WARMUP) must be < START ($START)"; exit 1; }
+PSI_START=$((WARMUP + 1))
 if [ "$DEVICE" = auto ]; then
   DEVICE=$(python3 -c "import torch; print('cuda:0' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')")
 fi
 echo "device: $DEVICE"
 export PYTORCH_ENABLE_MPS_FALLBACK=1        # only used on mps
-TAG=mac_r${ROUNDS}_s${START}_c${NC}
+TAG=r${ROUNDS}_s${START}_w${WARMUP}_c${NC}_cap${CAP}
 
-# same yaml for every method; only rounds changed (rt_* keys are ignored by baselines)
-sed "s/^global_rounds: .*/global_rounds: ${ROUNDS}/" configs/het-iid-exp_rt_filter_mps_new.yaml > configs/het-iid-exp_${TAG}_new.yaml
+# same yaml for every method; only rounds + sample cap changed (rt_* keys are ignored by baselines)
+cfg() { sed -e "s/^global_rounds: .*/global_rounds: ${ROUNDS}/" -e "s/^max_client_samples: .*/max_client_samples: ${CAP}/" "$1" > "$2"; }
+cfg configs/het-iid-exp_rt_filter_mps_new.yaml configs/het-iid-exp_${TAG}_new.yaml
 
 COMMON="--seed=15698 --algorithm=GeFL_gan_pacfl_iid \
   --num_train_mnist=$NC --num_train_emnist=$NC --num_train_cifar10=$NC \
@@ -25,9 +36,9 @@ COMMON="--seed=15698 --algorithm=GeFL_gan_pacfl_iid \
   --exp_conf=./configs/het-iid-exp_${TAG}_new.yaml"
 
 for LM in rt image-bi missing_link feature-bi image-cs; do
-  # PSI: mapping exists before round 1 -> global model trained from round 1.
-  # baselines: mapping needs trained generators -> global model from round START.
-  S=$START; [ "$LM" = rt ] && S=1
+  # PSI: table built before round 1; global model after the generator warm-up (WARMUP+1).
+  # baselines: mapping needs trained models/generators -> built at START, global model from START.
+  S=$START; [ "$LM" = rt ] && S=$PSI_START
   D=logs/${TAG}_${LM}/GeFL_gan_pacfl_iid
   [ -f $D/global_model_acc_mix.csv ] && [ "$(wc -l < $D/global_model_acc_mix.csv)" -gt $((ROUNDS - S + 1)) ] \
     && { echo "skip $LM (done)"; continue; }
@@ -43,12 +54,12 @@ done
 #   psi_tag_hash  = per-check fuzzy-PSI tags, each side sends hash(tag_text|tag_image|tag_verify);
 #                   server: AND via equal hashes, Mutual, grouping. No circuit, no rival margin.
 for V in attn_filter attn cpsi_helper cpsi_2pc cpsi_tag psi_tag_hash; do
-  sed "s/^global_rounds: .*/global_rounds: ${ROUNDS}/" configs/het-iid-exp_rt_${V}_mps_new.yaml > configs/het-iid-exp_${TAG}_${V}_new.yaml
+  cfg configs/het-iid-exp_rt_${V}_mps_new.yaml configs/het-iid-exp_${TAG}_${V}_new.yaml
   D=logs/${TAG}_rt_${V}/GeFL_gan_pacfl_iid
-  if [ -f $D/global_model_acc_mix.csv ] && [ "$(wc -l < $D/global_model_acc_mix.csv)" -gt $ROUNDS ]; then
+  if [ -f $D/global_model_acc_mix.csv ] && [ "$(wc -l < $D/global_model_acc_mix.csv)" -gt $((ROUNDS - PSI_START + 1)) ]; then
     echo "skip rt_${V} (done)"
   else
-    python3 main_new.py ${COMMON/het-iid-exp_${TAG}_new.yaml/het-iid-exp_${TAG}_${V}_new.yaml} --start_mapping_epoch=1 \
+    python3 main_new.py ${COMMON/het-iid-exp_${TAG}_new.yaml/het-iid-exp_${TAG}_${V}_new.yaml} --start_mapping_epoch=$PSI_START \
       --label_mapping=rt --exp_timestamp=${TAG}_rt_${V}
   fi
 done
