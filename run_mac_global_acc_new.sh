@@ -22,6 +22,10 @@ DEVICE=${4:-auto}
 WARMUP=${5:-$((START - 1))}
 CAP=${6:-0}
 METHOD=${7:-all}
+# positional args are easy to shift: fail fast instead of deep inside torch
+for V in ROUNDS START NC CAP; do [[ ${!V} =~ ^[0-9]+$ ]] || { echo "$V must be an integer, got '${!V}' (args: ROUNDS START NC DEVICE WARMUP CAP METHOD)"; exit 1; }; done
+[[ $DEVICE =~ ^(auto|cpu|mps|cuda(:[0-9]+)?)$ ]] || { echo "DEVICE must be auto|cpu|mps|cuda:N, got '$DEVICE' (args: ROUNDS START NC DEVICE WARMUP CAP METHOD)"; exit 1; }
+[ "$NC" -le 100 ] || { echo "NC=$NC clients per dataset looks wrong (did CAP land in slot 3?)"; exit 1; }
 ALL_METHODS="rt image-bi missing_link feature-bi image-cs rt_attn_filter rt_attn rt_cpsi_helper rt_cpsi_2pc rt_cpsi_tag rt_psi_tag_hash rt_psi_trivial"
 if [ "$METHOD" != all ]; then
   for M in ${METHOD//,/ }; do
