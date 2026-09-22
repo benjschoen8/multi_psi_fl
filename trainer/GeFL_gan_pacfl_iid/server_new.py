@@ -15,8 +15,11 @@ Outputs in log_dir:
   global_model_acc_<ds>.csv  Round, Epoch, Accuracy, Coverage  (unmapped samples counted WRONG)
 
 exp_conf keys (all optional):
-  rt_method              'filter'   'filter' | 'affscan' | 'attn' | 'attn_filter'
+  rt_method              'filter'   'filter' | 'affscan' | 'attn' | 'attn_filter' | 'trivial'
+                                    trivial: every client describes a class by the same agreed name
+                                    ("3", "A", "car"); exact PSI on the names (label_mapping/psi_trivial_new.py)
   rt_psi                 'he'       'he' (CKKS, needs `pip install tenseal`) | 'plain' (debug)
+                                    trivial: 'dh' (exact DH-PSI, default) | 'plain'
                                      | 'cpsi_helper' (BFV circuit-PSI + helper client; server sees final table only)
                                      | 'cpsi_2pc'    (VOLE circuit-PSI, per-pair 2PC, 2PC grouping; no helper)
                                      | 'cpsi_tag'    (VOLE circuit-PSI, equality tags; server groups in the clear)
@@ -58,6 +61,7 @@ from label_mapping.label_mapping_utils import global_to_local_mapping
 from label_mapping.rt_protocol import LADDER, to_group_map, pair_metrics, TEXT_ANCHORS
 from label_mapping.circuit_psi_new import run_rt_protocol   # psi='circuit' -> server-free circuit-PSI
 from label_mapping.rt_descriptions import keywords, LANGS
+from label_mapping.psi_trivial_new import run_trivial      # rt_method: trivial (exact PSI on shared names)
 from data.datasets import get_raw_dataset_transform
 
 _MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -261,6 +265,19 @@ class Server(OldServer):
                     feats[l] += v
         return {int(l): v / got[l] for l, v in feats.items()}, {int(k): v for k, v in count.items()}
 
+    def _client_counts(self, client):
+        """Local class counts only (rt_method: trivial needs no encoder)."""
+        ds = client.train_loader.dataset
+        base = getattr(ds, 'dataset', None)
+        tgt = next((getattr(base, a) for a in ('targets', 'labels') if hasattr(base, a)), None)
+        if tgt is not None and hasattr(ds, 'indices'):
+            count = Counter(np.asarray(tgt)[np.asarray(ds.indices)].tolist())
+        else:
+            count = Counter()
+            for _, y in client.train_loader:
+                count.update(y.numpy().tolist())
+        return {int(k): v for k, v in count.items()}
+
     # ------------------------------------------------------------------ attn*: client-written descriptions
     def _rt_text_side(self, clients, rows):
         """Each client writes KEYWORDS for each own class in its own language (e.g. ["數字", "三"]) and
@@ -302,8 +319,10 @@ class Server(OldServer):
     # ------------------------------------------------------------------ RT protocol
     def rt_label_mapping(self):
         method = self.cfg('rt_method', 'filter')
-        psi = self.cfg('rt_psi', 'he')
+        psi = self.cfg('rt_psi', 'dh' if method == 'trivial' else 'he')
         self.logger.log(f"[RT] Building relation table before training: method={method}, psi={psi}")
+        if method == 'trivial':
+            return self._rt_trivial(psi)
         enc = self._rt_encoder()
         P = self._anchors(enc)
         mu = P.mean(axis=0)                  # public head: subtract public anchor mean
@@ -340,6 +359,29 @@ class Server(OldServer):
             min_samples=self.cfg('rt_min_samples', 10), seed=self.args.seed or 0,
             gt=gt, log=self.logger.log, masked_out=masked)
 
+        self._rt_finish(method, psi, clients, table, edges, diag, masked, desc_rows, ladder, len(P), gt, aliases)
+
+    def _rt_trivial(self, psi):
+        """rt_method: trivial -- each client's description of class a is the agreed common name
+        (shared_name: '3', 'A', 'car'); exact PSI on those names gives the relation table."""
+        aliases = self.cfg('rt_gt_aliases', {})
+        clients = {}
+        for c in self.clients:
+            count = self._client_counts(c)
+            clients[c.id] = {"names": {a: c.class_name_set[a] for a in self._rt_pick(c, count)}, "count": count}
+        by_id = {c.id: c for c in self.clients}
+        name = lambda i, a: _norm_name(by_id[i].class_name_set[a], aliases)
+        gt = lambda i, a, j, b: name(i, a) == name(j, b)
+        masked = {}
+        # names need no image summary -> every held class joins the PSI (rt_min_samples is for fuzzy methods)
+        table, edges, diag = run_trivial(clients, psi=psi, min_samples=self.cfg('rt_trivial_min_samples', 1),
+                                         seed=self.args.seed or 0, aliases=aliases, log=self.logger.log,
+                                         masked_out=masked)
+        desc_rows = [(i, a, "", "exact", name(i, a)) for i, c in clients.items() for a in c["names"]]
+        self._rt_finish('trivial', psi, clients, table, edges, diag, masked, desc_rows, None, 0, gt, aliases)
+
+    def _rt_finish(self, method, psi, clients, table, edges, diag, masked, desc_rows, ladder, n_anchors, gt, aliases):
+        by_id = {c.id: c for c in self.clients}
         group_of = {c.id: c.group_name for c in self.clients}
         mapping = to_group_map(table, group_of)
         self.local_id_to_global_id = mapping
@@ -378,11 +420,12 @@ class Server(OldServer):
                 w.writerow([g, cid, group_of[cid], a, by_id[cid].class_name_set[a]])
 
         counts = np.array([n for c in clients.values() for n in c["count"].values()])
+        min_s = self.cfg('rt_trivial_min_samples', 1) if method == 'trivial' else self.cfg('rt_min_samples', 10)
         np.savez_compressed(os.path.join(d, "rt_diagnostics.npz"), class_counts=counts,
                             **{k: v for k, v in diag.items() if np.ndim(v) > 0})
         summary = {k: int(v) for k, v in diag.items() if np.ndim(v) == 0}
-        summary.update(method=method, psi=psi, ladder=ladder, n_anchors=int(len(P)),
-                       classes_below_min=int((counts < self.cfg('rt_min_samples', 10)).sum()),
+        summary.update(method=method, psi=psi, ladder=ladder, n_anchors=int(n_anchors),
+                       classes_below_min=int((counts < min_s).sum()),
                        metrics_client=m_client, metrics_group=m_group)
         with open(os.path.join(d, "rt_diagnostics.json"), 'w') as f:
             json.dump(summary, f, indent=2, default=float)
