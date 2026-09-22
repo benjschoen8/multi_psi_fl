@@ -100,7 +100,8 @@ class Server(OldServer):
                 sub = Subset(ds.dataset, [ds.indices[k] for k in keep])
             else:
                 sub = Subset(ds, keep)
-            c.train_loader = DataLoader(sub, batch_size=c.train_loader.batch_size, shuffle=True, num_workers=0)
+            bs = c.train_loader.batch_size      # drop_last: size-1 batch crashes BatchNorm
+            c.train_loader = DataLoader(sub, batch_size=bs, shuffle=True, num_workers=0, drop_last=len(sub) > bs)
             c.num_samples = n
         self.logger.log(f"[Server] max_client_samples={n}: client training sets capped")
 
