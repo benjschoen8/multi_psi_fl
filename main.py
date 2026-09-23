@@ -58,6 +58,7 @@ IMPLEMENTED_LM = ["image-bi", "image-single", "feature-bi", "image-cs", "slam_du
                   "ours_5_noEntropy", 
                   "slam_dunk_mapping_5", "slam_dunk_mapping_10", "slam_dunk_mapping_15", "slam_dunk_mapping_20", "slam_dunk_mapping_25",
                   "improve_single_noniid",
+                  "psi_trivial",
                   ]   
 
 DATASET_META = { 

@@ -1,7 +1,9 @@
 """
 Server for GeFL DDPM baseline total gan
 """
-
+from collections import OrderedDict, defaultdict, Counter
+from label_mapping.psi_trivial_new import run_trivial
+from label_mapping.rt_protocol import to_group_map
 import torch
 import copy
 from collections import OrderedDict, defaultdict
@@ -38,6 +40,7 @@ class Server(BaseServer):
 
         self.client_groups = defaultdict(list)      
         self.group_label_space_meta = {}
+        self.local_id_to_global_id = {}   # save_model() reads it before the mapping round
 
     def initialize_client_groups(self):
         self.logger.log("Clustering clients by PACFL ...")
@@ -100,6 +103,8 @@ class Server(BaseServer):
                         selected = imgs[idxs[:remain]]
                         label_images[label].append(selected)
                         label_stored[label] += len(selected)
+
+            client.label_counts = dict(label_counts)
 
             labels = sorted(label_counts.keys())
             counts = np.array([label_counts[label] for label in labels], dtype=float)
@@ -195,8 +200,8 @@ class Server(BaseServer):
 
             self.aggregate()
 
-            # if (r+1) % 5 == 0:
-            #     self.save_model(r+1) 
+            if (r+1) % 5 == 0:   # checkpoints for label_mapping/offline_mapping_noniid_global.py
+                self.save_model(r+1)
 
         # self.save_model()
         # plot_accuracy_curves(self.dataset_acc_history, self.logger.log_dir, self.args, self.global_rounds, self.dirichlet_alpha)
@@ -363,6 +368,18 @@ class Server(BaseServer):
                     gen_dict=generators
                 )
                 global_map = global_to_local_mapping(mapping, logger=self.logger, label_space_meta=dataset_label_space_meta)
+                self.local_id_to_global_id = mapping
+
+            elif self.args.label_mapping == 'psi_trivial':
+                # exact DH-PSI on shared class names (label_mapping/psi_trivial_new.py)
+                clients = {c.id: {"names": {a: c.class_name_set[a] for a in c.label_counts},
+                                  "count": c.label_counts} for c in self.clients}
+                table, edges, diag = run_trivial(
+                    clients, psi=self.exp_conf.get('rt_psi', 'dh'),
+                    aliases=self.exp_conf.get('rt_gt_aliases', {}),
+                    seed=self.args.seed or 0, log=self.logger.log)
+                mapping = to_group_map(table, {c.id: c.group_name for c in self.clients})
+                global_map = global_to_local_mapping(mapping, logger=self.logger, label_space_meta=self.group_label_space_meta)
                 self.local_id_to_global_id = mapping
 
             elif self.args.label_mapping == "improve_single_noniid":

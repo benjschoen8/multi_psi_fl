@@ -5,6 +5,7 @@ echo "Experiment Timestamp: $TIMESTAMP"
 
 TOTAL_START=$SECONDS
 CUDA="cuda:1"
+DEVICE="mps"   # offline mapping device: mps on Mac, cuda:1 on the GPU server
 
 
 # ------------------------------------------------------------------------
@@ -77,6 +78,12 @@ CUDA="cuda:1"
 # python label_mapping/offline_mapping_noniid_global.py --seed=1248 --label_mapping=missing_link_single --log_dir=./logs/seed1248_noniid_gan_weight/GeFL_gan_pacfl_iid
 # python label_mapping/offline_mapping_noniid_global.py --seed=15698 --label_mapping=missing_link_single --log_dir=./logs/seed15698_noniid_gan_weight/GeFL_gan_pacfl_iid
 
+# python label_mapping/offline_mapping_noniid_global.py --seed=1 --label_mapping=psi_trivial --log_dir=./logs/seed1_noniid_gan_weight/GeFL_gan_pacfl_iid
+# python label_mapping/offline_mapping_noniid_global.py --seed=42 --label_mapping=psi_trivial --log_dir=./logs/seed42_noniid_gan_weight/GeFL_gan_pacfl_iid
+# python label_mapping/offline_mapping_noniid_global.py --seed=758 --label_mapping=psi_trivial --log_dir=./logs/seed758_noniid_gan_weight/GeFL_gan_pacfl_iid
+# python label_mapping/offline_mapping_noniid_global.py --seed=1248 --label_mapping=psi_trivial --log_dir=./logs/seed1248_noniid_gan_weight/GeFL_gan_pacfl_iid
+# python label_mapping/offline_mapping_noniid_global.py --seed=15698 --label_mapping=psi_trivial --log_dir=./logs/seed15698_noniid_gan_weight/GeFL_gan_pacfl_iid
+
 
 
 # python label_mapping/offline_mapping_noniid_global.py --seed=1 --label_mapping=image-cs --log_dir=./logs/seed1_noniid_gan_weight/GeFL_gan_pacfl_iid
@@ -122,6 +129,16 @@ CUDA="cuda:1"
 # iid
 # ------------------------------------------------------------------------
 
+# 1) train + save checkpoints every 5 rounds -> logs/seed{S}_iid_gan_weight/GeFL_gan_pacfl_iid
+#    (skipped only when the run finished: round-45 checkpoint exists)
+for S in 1 42 758 1248 15698; do
+    [ -f ./logs/seed${S}_iid_gan_weight/GeFL_gan_pacfl_iid/server_checkpoints_45.pth ] && continue
+    python3 main.py --seed=$S --algorithm=GeFL_gan_pacfl_iid --num_train_cifar100=0 --num_train_fashionmnist=0 --num_train_usps=0 \
+        --device=$DEVICE --exp_conf=./configs/het-iid-exp.yaml --pacfl_cluster_alpha=10 --pacfl_basis_budget=20 \
+        --exp_timestamp=seed${S}_iid_gan_weight
+done
+
+# 2) offline label mapping on the saved checkpoints
 # python label_mapping/offline_mapping_noniid_global.py --seed=1 --label_mapping=improve_single --log_dir=./logs/seed1_iid_gan_weight/GeFL_gan_pacfl_iid
 # python label_mapping/offline_mapping_noniid_global.py --seed=42 --label_mapping=improve_single --log_dir=./logs/seed42_iid_gan_weight/GeFL_gan_pacfl_iid
 # python label_mapping/offline_mapping_noniid_global.py --seed=758 --label_mapping=improve_single --log_dir=./logs/seed758_iid_gan_weight/GeFL_gan_pacfl_iid
@@ -142,11 +159,17 @@ CUDA="cuda:1"
 # python label_mapping/offline_mapping_noniid_global.py --seed=1248 --label_mapping=missing_link --log_dir=./logs/seed1248_iid_gan_weight/GeFL_gan_pacfl_iid
 # python label_mapping/offline_mapping_noniid_global.py --seed=15698 --label_mapping=missing_link --log_dir=./logs/seed15698_iid_gan_weight/GeFL_gan_pacfl_iid
 
-python label_mapping/offline_mapping_noniid_global.py --seed=1 --label_mapping=missing_link_single --log_dir=./logs/seed1_iid_gan_weight/GeFL_gan_pacfl_iid
-python label_mapping/offline_mapping_noniid_global.py --seed=42 --label_mapping=missing_link_single --log_dir=./logs/seed42_iid_gan_weight/GeFL_gan_pacfl_iid
-python label_mapping/offline_mapping_noniid_global.py --seed=758 --label_mapping=missing_link_single --log_dir=./logs/seed758_iid_gan_weight/GeFL_gan_pacfl_iid
-python label_mapping/offline_mapping_noniid_global.py --seed=1248 --label_mapping=missing_link_single --log_dir=./logs/seed1248_iid_gan_weight/GeFL_gan_pacfl_iid
-python label_mapping/offline_mapping_noniid_global.py --seed=15698 --label_mapping=missing_link_single --log_dir=./logs/seed15698_iid_gan_weight/GeFL_gan_pacfl_iid
+python3 label_mapping/offline_mapping_noniid_global.py --seed=1 --label_mapping=missing_link_single --log_dir=./logs/seed1_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=42 --label_mapping=missing_link_single --log_dir=./logs/seed42_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=758 --label_mapping=missing_link_single --log_dir=./logs/seed758_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=1248 --label_mapping=missing_link_single --log_dir=./logs/seed1248_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=15698 --label_mapping=missing_link_single --log_dir=./logs/seed15698_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+
+python3 label_mapping/offline_mapping_noniid_global.py --seed=1 --label_mapping=psi_trivial --log_dir=./logs/seed1_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=42 --label_mapping=psi_trivial --log_dir=./logs/seed42_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=758 --label_mapping=psi_trivial --log_dir=./logs/seed758_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=1248 --label_mapping=psi_trivial --log_dir=./logs/seed1248_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
+python3 label_mapping/offline_mapping_noniid_global.py --seed=15698 --label_mapping=psi_trivial --log_dir=./logs/seed15698_iid_gan_weight/GeFL_gan_pacfl_iid --device=$DEVICE
 
 
 # python label_mapping/offline_mapping_noniid_global.py --seed=1 --label_mapping=image-cs --log_dir=./logs/seed1_iid_gan_weight/GeFL_gan_pacfl_iid

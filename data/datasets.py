@@ -300,9 +300,7 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
             print(f"{'':<6} | {'':<6} | {'':<6} | Test : [{test_info_str}]")
             print("-" * 60) 
             
-            # drop_last: a size-1 last batch crashes BatchNorm in train mode (ShuffleNet); tiny clients keep theirs
-            train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=0,
-                                      drop_last=len(train_subset) > batch_size)
+            train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=0)
             test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False, num_workers=0)
             
             client_loaders.append({
